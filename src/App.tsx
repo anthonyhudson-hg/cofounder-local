@@ -25,6 +25,7 @@ import { useEmployee } from "./hooks/useEmployee";
 import { useEmployees } from "./hooks/useEmployees";
 import { useNotificationPreference } from "./hooks/useNotificationPreference";
 import { useStartupErrors } from "./hooks/useStartupErrors";
+import { useUpdateChecker } from "./hooks/useUpdateChecker";
 import { useUserProfile } from "./hooks/useUserProfile";
 import { setActiveCompanyId } from "./lib/activeCompany";
 import { command } from "./lib/runtimeClient";
@@ -64,6 +65,7 @@ export default function App() {
   } = useNotificationPreference();
   useDesktopNotifications(notificationsEnabled, activeId);
   const startupError = useStartupErrors();
+  const update = useUpdateChecker();
 
   // Apply the active company's theme across the whole UI; re-applies on switch.
   useEffect(() => {
@@ -192,6 +194,25 @@ export default function App() {
     <div className="app-root">
       <TitleBar>{company.name}</TitleBar>
       {startupError && <div className="startup-error-banner">{startupError}</div>}
+      {update.available && (
+        <div className="update-banner">
+          <span className="update-banner-text">
+            {update.installing
+              ? "Installing update, restarting shortly…"
+              : `A new version${update.version ? ` (${update.version})` : ""} is available.`}
+          </span>
+          {!update.installing && (
+            <>
+              <button className="update-banner-btn update-banner-btn-primary" onClick={update.install}>
+                Restart to update
+              </button>
+              <button className="update-banner-btn update-banner-btn-dismiss" onClick={update.dismiss}>
+                Dismiss
+              </button>
+            </>
+          )}
+        </div>
+      )}
       <div className="app-shell">
       <IconRail
         view={view}
@@ -291,6 +312,7 @@ export default function App() {
           canDelete={companies.length > 1}
           onDelete={handleDeleteCompany}
           onClose={() => setAppSettingsOpen(false)}
+          update={update}
         />
       )}
       {searchOpen && (

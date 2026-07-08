@@ -53,6 +53,41 @@ body {
   flex-shrink: 0;
 }
 
+.update-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: #eef0ff;
+  color: #2a2740;
+  font-size: 0.85rem;
+  border-bottom: 1px solid #d5cdd5;
+  flex-shrink: 0;
+}
+
+.update-banner-text {
+  flex: 1;
+}
+
+.update-banner-btn {
+  border: none;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.update-banner-btn-primary {
+  background: var(--accent-active);
+  color: #fff;
+}
+
+.update-banner-btn-dismiss {
+  background: transparent;
+  color: #2a2740;
+  padding: 4px 6px;
+}
+
 .app-shell {
   display: flex;
   flex: 1;

@@ -3,6 +3,7 @@ import { useRef, useState } from "react";
 import { useAsyncAction } from "../hooks/useAsyncAction";
 import { useEscapeToClose } from "../hooks/useEscapeToClose";
 import { usePhotoUpload } from "../hooks/usePhotoUpload";
+import { useUpdateChecker } from "../hooks/useUpdateChecker";
 import { Company } from "../types";
 import { THEMES, applyTheme, themeForColor } from "../lib/themes";
 
@@ -12,9 +13,12 @@ interface Props {
   canDelete: boolean;
   onDelete: () => Promise<void> | void;
   onClose: () => void;
+  /** Shared with App.tsx's own instance so opening this modal doesn't trigger
+   *  a second, redundant update check on top of the one already run at launch. */
+  update: ReturnType<typeof useUpdateChecker>;
 }
 
-export function AppSettingsModal({ company, onUpdateField, canDelete, onDelete, onClose }: Props) {
+export function AppSettingsModal({ company, onUpdateField, canDelete, onDelete, onClose, update }: Props) {
   const [name, setName] = useState(company.name);
   const [profile, setProfile] = useState(company.profile);
   const [systemPrompt, setSystemPrompt] = useState(company.system_prompt);
@@ -168,6 +172,28 @@ export function AppSettingsModal({ company, onUpdateField, canDelete, onDelete, 
               Save changes
             </button>
             {savedFlash && <span className="settings-saved-flash">Saved</span>}
+          </div>
+
+          <div className="debug-field">
+            <div className="debug-label">Software update</div>
+            <p className="settings-hint">
+              {update.available
+                ? `A new version${update.version ? ` (${update.version})` : ""} is available.`
+                : "You're on the latest version."}
+            </p>
+            <button
+              className="settings-link-btn"
+              onClick={update.available ? update.install : update.checkNow}
+              disabled={update.checking || update.installing}
+            >
+              {update.installing
+                ? "Installing…"
+                : update.checking
+                  ? "Checking…"
+                  : update.available
+                    ? "Restart to update"
+                    : "Check for updates"}
+            </button>
           </div>
 
           <div className="debug-field company-danger-zone">
