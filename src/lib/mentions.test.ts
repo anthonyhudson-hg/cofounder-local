@@ -30,6 +30,17 @@ describe("findMentions", () => {
     expect(matches).toHaveLength(0);
   });
 
+  it("does not match when a word character immediately precedes the mention (report §5.9)", () => {
+    const matches = findMentions("cc@Ben Dover", targets);
+    expect(matches).toHaveLength(0);
+  });
+
+  it("still matches when preceded by punctuation or start-of-string", () => {
+    expect(findMentions("@Ben Dover", targets)).toHaveLength(1);
+    expect(findMentions("(@Ben Dover)", targets)).toHaveLength(1);
+    expect(findMentions("hi, @Ben Dover!", targets)).toHaveLength(1);
+  });
+
   it("prefers the longest matching label to avoid partial overlaps", () => {
     const overlapping = [
       { type: "employee" as const, conversationId: "ben", label: "Ben" },

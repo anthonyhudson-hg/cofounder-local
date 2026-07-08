@@ -54,7 +54,11 @@ export function findMentions(content: string, targets: MentionTarget[]): Mention
     let idx = 0;
     while ((idx = content.indexOf(needle, idx)) !== -1) {
       const endIdx = idx + needle.length;
-      if (!isWordChar(content[endIdx])) {
+      // Only the trailing boundary was checked before — a mention embedded directly
+      // after a word character with no separating whitespace (e.g. "cc@Ben Dover")
+      // still registered as a match. Require a boundary on both edges, matching how
+      // @mentions work everywhere else (report §5.9).
+      if (!isWordChar(content[idx - 1]) && !isWordChar(content[endIdx])) {
         matches.push({ type: t.type, target: t, start: idx, end: endIdx });
       }
       idx = endIdx;

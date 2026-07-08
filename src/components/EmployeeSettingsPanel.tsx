@@ -1,5 +1,6 @@
 import { Camera, CaretRight, Check, DiceFive, Hash, Plus, X } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
+import { descendantIds } from "../lib/orgChart";
 import { buildIdentityBlock, composeSystemPrompt, resolveManagerName } from "../lib/promptBuilder";
 import { randomSillyName } from "../lib/sillyNames";
 import { Conversation, EFFORTS, Effort, Employee, MODELS, PROVIDERS, PROVIDER_LABELS, Responsibility } from "../types";
@@ -12,32 +13,6 @@ import { useResponsibilities } from "../hooks/useResponsibilities";
 import { useTokenCount } from "../hooks/useTokenCount";
 import { Avatar } from "./Avatar";
 import { EmployeeInfo } from "./MessageList";
-
-/**
- * All employees transitively managed by `rootId` (i.e. its full reporting subtree),
- * walked via BFS over `manager_employee_id`. A same-immediate-report check alone
- * (`e.manager_employee_id !== rootId`) only blocks a 1-hop cycle — A managing C who
- * already reports (via B) to A is a 2-hop cycle the old check let straight through
- * (report §4.1).
- */
-function descendantIds(rootId: string, employees: Employee[]): Set<string> {
-  const byManager = new Map<string, string[]>();
-  for (const e of employees) {
-    if (!e.manager_employee_id) continue;
-    const list = byManager.get(e.manager_employee_id);
-    if (list) list.push(e.id);
-    else byManager.set(e.manager_employee_id, [e.id]);
-  }
-  const seen = new Set<string>();
-  const queue = [...(byManager.get(rootId) ?? [])];
-  while (queue.length > 0) {
-    const id = queue.shift()!;
-    if (seen.has(id)) continue;
-    seen.add(id);
-    queue.push(...(byManager.get(id) ?? []));
-  }
-  return seen;
-}
 
 interface Props {
   conversation: Conversation;

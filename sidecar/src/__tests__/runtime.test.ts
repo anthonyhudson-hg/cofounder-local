@@ -268,6 +268,47 @@ test("github connector: a cwd outside the company workspace is rejected (report 
   await ctx.db.destroy();
 });
 
+test("dispatch: validateInbound rejects malformed messages before dispatch() ever sees them (report §1.4/§3.3)", async () => {
+  const { validateInbound, dispatch } = await import("../runtime/dispatch");
+  const ctx = freshCtx();
+
+  // Every test before this one exercised domain services directly, bypassing
+  // dispatch()/the wire-protocol validation boundary entirely — the malformed-id
+  // path that caused a client to hang forever (report §3.3) was completely
+  // unexercised. These assert the actual boundary function directly.
+  assert.equal(validateInbound({ kind: "query", type: "ping", companyId: null, payload: {} }), false, "missing id");
+  assert.equal(validateInbound({ kind: "query", id: "x", companyId: null, payload: {} }), false, "missing type");
+  assert.equal(
+    validateInbound({ kind: "bogus", id: "x", type: "ping", companyId: null, payload: {} }),
+    false,
+    "wrong kind",
+  );
+  assert.equal(
+    validateInbound({ kind: "query", id: "x", type: "ping", companyId: 123, payload: {} }),
+    false,
+    "companyId wrong type",
+  );
+  assert.equal(
+    validateInbound({ kind: "query", id: "x", type: "ping", companyId: null, payload: {} }),
+    true,
+    "well-shaped message passes",
+  );
+
+  // A well-shaped but unregistered type fails cleanly through dispatch — a normal
+  // rejected promise with a clear message, not a crash or a hang.
+  await assert.rejects(
+    () =>
+      dispatch(
+        ctx,
+        { kind: "query", id: "x", type: "not-a-real-handler", companyId: null, payload: {} } as never,
+        { delta: () => {} },
+      ),
+    /no handler for query:not-a-real-handler/,
+  );
+
+  await ctx.db.destroy();
+});
+
 // keep tmp dir from filling forever in CI
 test.after?.(() => {
   try {
