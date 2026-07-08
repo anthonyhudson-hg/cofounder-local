@@ -17,16 +17,32 @@ interface SendChannelMessageResult {
   responders: ChannelResponderOutcome[];
 }
 
+interface PendingSend {
+  userMsgId: string;
+  text: string;
+  replyTo?: ReplyTarget;
+}
+
+const EPHEMERAL_PREFIX = "ephemeral-";
+
 /**
  * The runtime now owns the entire channel turn loop — relevance-gating every
  * member, running each responder in parallel, and parsing each one's
  * control-block for whether/where to post and which reactions to add (full
  * cutover — this used to be an entirely client-orchestrated flow spanning
  * per-member `cos_check_relevance`/`cos_send_channel` legacy sidecar calls).
- * This hook is now just a thin optimistic-UI layer over the single
- * `message.sendChannel` command; the actual responses simply appear on the
- * `reload()` once the whole turn settles (no live streaming — channel replies
- * never streamed to the UI even before this cutover).
+ *
+ * Streams live now, same as a DM: a responder has no message row until it
+ * decides to post (that depends on parsing its own control block, which only
+ * exists once its turn finishes), so there's nothing to attach a real
+ * message id's delta to while it's in flight — instead, each responding
+ * member gets a synthetic "ephemeral-<employeeId>" placeholder message that
+ * grows as its "channelText"/"channelTool" deltas arrive, and disappears the
+ * moment its "channelDone" delta fires (reload() picks up whatever it
+ * actually posted, if anything, keyed by the server's real id).
+ *
+ * Sends while one is already in flight queue rather than block, same as a
+ * DM — there's no reason a channel composer should behave differently.
  */
 export function useChannel(conversationId: string, companyId: string, onActivity?: () => void) {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -34,7 +50,14 @@ export function useChannel(conversationId: string, companyId: string, onActivity
   const [reactions, setReactions] = useState<Record<string, string[]>>({});
   const [members, setMembers] = useState<Employee[]>([]);
   const [sending, setSending] = useState(false);
+  // Tool name each responding member is currently calling, keyed by employeeId
+  // (unlike a DM, several members can be mid-turn — and mid-tool-call — at once).
+  const [activeTools, setActiveTools] = useState<Record<string, string>>({});
   const messagesRef = useRef<Message[]>([]);
+  // Synchronous mirror of `sending` — see useConversation.ts's identical guard
+  // for why this can't just read the React state inside send().
+  const sendingRef = useRef(false);
+  const queueRef = useRef<PendingSend[]>([]);
   // Separate stale guards per reload target — this hook is not remounted per
   // conversationId (confirmed via ChatPane's lack of a `key`), so a fast channel
   // switch can otherwise let an older conversation's slower response land after
@@ -42,6 +65,11 @@ export function useChannel(conversationId: string, companyId: string, onActivity
   const membersGuard = useStaleGuard();
   const reactionsGuard = useStaleGuard();
   const messagesGuard = useStaleGuard();
+
+  const applyPatch = useCallback((id: string, patch: Partial<Message>) => {
+    messagesRef.current = messagesRef.current.map((m) => (m.id === id ? { ...m, ...patch } : m));
+    setMessages(messagesRef.current);
+  }, []);
 
   const reloadMembers = useCallback(async () => {
     const token = membersGuard.begin();
@@ -64,11 +92,27 @@ export function useChannel(conversationId: string, companyId: string, onActivity
     const rows = await query<Message[]>("messages.list", { conversationId }, null);
     const replyCountRows = await query<Record<string, number>>("messages.replyCounts", { conversationId }, null);
     if (!messagesGuard.isCurrent(token)) return;
-    messagesRef.current = rows;
-    setMessages(rows);
+    // Real rows just arrived — preserve any ephemeral placeholders still live
+    // (a later, still-in-flight responder in the same batch) rather than
+    // wiping them out from under an active stream.
+    const ephemeral = messagesRef.current.filter((m) => m.id.startsWith(EPHEMERAL_PREFIX));
+    messagesRef.current = [...rows, ...ephemeral];
+    setMessages(messagesRef.current);
     setReplyCounts(replyCountRows);
     await reloadReactions();
   }, [conversationId, reloadReactions, messagesGuard]);
+
+  // Calling the memoized `reload` directly from inside the doubly-nested
+  // onDelta callback below (itself nested inside runSend) made the React
+  // Compiler unable to prove the hand-written memoization was preserved and
+  // it silently skipped optimizing this whole hook (a real, verified
+  // difference from useConversation.ts, which only ever calls reload() from
+  // its top-level finally block, not from a nested sub-callback). Routing
+  // through a ref sidesteps it — always current, opaque to that analysis.
+  const reloadRef = useRef(reload);
+  useEffect(() => {
+    reloadRef.current = reload;
+  }, [reload]);
 
   useEffect(() => {
     reload();
@@ -87,8 +131,110 @@ export function useChannel(conversationId: string, companyId: string, onActivity
     [reloadReactions, companyId],
   );
 
+  const runSend = useCallback(
+    async (item: PendingSend) => {
+      const { text: trimmed, replyTo } = item;
+
+      onActivity?.();
+      sendingRef.current = true;
+      setSending(true);
+
+      try {
+        await commandStreaming<SendChannelMessageResult>(
+          "message.sendChannel",
+          { conversationId, text: trimmed, replyTo: replyTo ? { messageId: replyTo.messageId, threadRootId: replyTo.threadRootId } : null },
+          companyId,
+          (channel, data) => {
+            if (channel === "channelText") {
+              const { employeeId, text: chunk } = data as { employeeId: string; text: string };
+              const ephemeralId = `${EPHEMERAL_PREFIX}${employeeId}`;
+              const existing = messagesRef.current.find((m) => m.id === ephemeralId);
+              if (existing) {
+                applyPatch(ephemeralId, { content: existing.content + chunk });
+              } else {
+                const placeholder: Message = {
+                  id: ephemeralId, conversation_id: conversationId, role: "assistant", content: chunk,
+                  model: null, effort: null, input_tokens: null, output_tokens: null,
+                  cache_creation_input_tokens: null, cache_read_input_tokens: null, total_cost_usd: null,
+                  status: "streaming", error_message: null, debug_payload: null,
+                  thread_root_id: null, reply_to_message_id: null,
+                  author_employee_id: employeeId, created_at: new Date().toISOString(),
+                };
+                messagesRef.current = [...messagesRef.current, placeholder];
+                setMessages(messagesRef.current);
+              }
+              return;
+            }
+            if (channel === "channelTool") {
+              const { employeeId, name, phase } = data as { employeeId: string; name: string; phase: "start" | "end" };
+              setActiveTools((prev) => {
+                const updated = { ...prev };
+                if (phase === "start") updated[employeeId] = name;
+                else delete updated[employeeId];
+                return updated;
+              });
+              return;
+            }
+            if (channel === "channelDone") {
+              const { employeeId } = data as { employeeId: string };
+              const ephemeralId = `${EPHEMERAL_PREFIX}${employeeId}`;
+              messagesRef.current = messagesRef.current.filter((m) => m.id !== ephemeralId);
+              setMessages(messagesRef.current);
+              setActiveTools((prev) => {
+                if (!(employeeId in prev)) return prev;
+                const updated = { ...prev };
+                delete updated[employeeId];
+                return updated;
+              });
+              // This responder's real message (if it posted one) already exists
+              // in the DB now — bring it in immediately rather than waiting for
+              // every other (possibly slower) responder to finish too.
+              void reloadRef.current();
+            }
+          },
+        );
+      } catch (err) {
+        // Unlike a DM, there's no single assistant placeholder to mark
+        // errored — a whole-batch failure this catastrophic (the command
+        // itself rejecting, not a per-responder failure the backend already
+        // handles and posts individually) has no natural per-message slot in
+        // the channel UI. Swallowed rather than left as an unhandled
+        // rejection now that send() is fire-and-forget (queueing needs it to
+        // be); at minimum, surfaced to the console instead of silently lost.
+        console.error("channel send failed:", err);
+      } finally {
+        // Belt-and-suspenders: clear any ephemeral placeholder that never got a
+        // matching channelDone (e.g. the command itself rejected outright).
+        messagesRef.current = messagesRef.current.filter((m) => !m.id.startsWith(EPHEMERAL_PREFIX));
+        setMessages(messagesRef.current);
+        setActiveTools({});
+        // reload() can itself reject (timeout, backend error); that must never
+        // suppress the sending-flag reset below or the composer gets stuck
+        // read-only even though the turn already completed (see
+        // useConversation.ts's identical guard for the same failure mode).
+        try {
+          await reload();
+        } catch {
+          // Swallowed — the next successful reload will catch the DB up.
+        }
+
+        const next = queueRef.current.shift();
+        if (next) {
+          // Hand off directly without flipping `sending` back to false in
+          // between, so the composer doesn't flicker enabled/disabled across
+          // two sends that were always meant to run back-to-back.
+          void runSend(next);
+        } else {
+          sendingRef.current = false;
+          setSending(false);
+        }
+      }
+    },
+    [conversationId, companyId, onActivity, applyPatch, reload],
+  );
+
   const send = useCallback(
-    async (text: string, replyTo?: ReplyTarget) => {
+    (text: string, replyTo?: ReplyTarget) => {
       const trimmed = text.trim();
       if (!trimmed || members.length === 0) return;
 
@@ -108,33 +254,16 @@ export function useChannel(conversationId: string, companyId: string, onActivity
         messagesRef.current = [...messagesRef.current, userMsg];
         setMessages(messagesRef.current);
       }
-      onActivity?.();
 
-      setSending(true);
-      try {
-        await commandStreaming<SendChannelMessageResult>(
-          "message.sendChannel",
-          { conversationId, text: trimmed, replyTo: replyTo ? { messageId: replyTo.messageId, threadRootId: replyTo.threadRootId } : null },
-          companyId,
-          () => {},
-        );
-      } finally {
-        // Channel replies (and any reactions responders added) only exist once
-        // the whole turn settles — reload picks up everything in one shot.
-        // reload() can itself reject (timeout, backend error); that must never
-        // suppress setSending(false) below or the composer gets stuck read-only
-        // even though the turn already completed (see useConversation.ts's
-        // identical guard for the same failure mode).
-        try {
-          await reload();
-        } catch {
-          // Swallowed — the next successful reload will catch the DB up.
-        }
-        setSending(false);
+      const item: PendingSend = { userMsgId, text: trimmed, replyTo };
+      if (sendingRef.current) {
+        queueRef.current.push(item);
+        return;
       }
+      void runSend(item);
     },
-    [conversationId, companyId, members, onActivity, reload],
+    [conversationId, members, runSend],
   );
 
-  return { messages, replyCounts, reactions, toggleReaction, members, send, sending, reload };
+  return { messages, replyCounts, reactions, toggleReaction, members, send, sending, activeTools, reload };
 }

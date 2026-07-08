@@ -41,7 +41,7 @@ function ChannelChatPane({
   onActivity,
 }: Props) {
   const isGroup = !!conversation.is_group;
-  const { messages, replyCounts, reactions, toggleReaction, members, send, sending } = useChannel(
+  const { messages, replyCounts, reactions, toggleReaction, members, send, sending, activeTools } = useChannel(
     conversation.id,
     companyId,
     onActivity,
@@ -121,11 +121,11 @@ function ChannelChatPane({
           replyCounts={replyCounts}
           onOpenThread={setOpenThreadId}
           onReply={setReplyingTo}
+          activeToolFor={(m) => (m.author_employee_id ? activeTools[m.author_employee_id] : undefined)}
         />
 
         <Composer
           placeholder={isGroup ? `Message ${conversation.name}` : `Message #${conversation.name}`}
-          disabled={sending}
           onSend={(text) => {
             send(text, replyingTo ? { messageId: replyingTo.id, threadRootId: replyingTo.thread_root_id } : undefined);
             setReplyingTo(null);
@@ -259,7 +259,7 @@ function DmChatPane({
           replyCounts={replyCounts}
           onOpenThread={setOpenThreadId}
           onReply={setReplyingTo}
-          activeTool={activeTool}
+          activeToolFor={(m) => (activeTool?.messageId === m.id ? activeTool.name : undefined)}
         />
 
         <Composer

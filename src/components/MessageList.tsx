@@ -23,8 +23,11 @@ interface Props {
   replyCounts: Record<string, number>;
   onOpenThread: (rootMessageId: string) => void;
   onReply: (message: Message) => void;
-  /** The message + tool name currently being called mid-turn, if any (see useConversation). */
-  activeTool?: { messageId: string; name: string } | null;
+  /** Tool name a streaming message is currently calling, if any — a DM has at
+   *  most one in-flight message (keyed by id); a channel can have several
+   *  responders mid-turn at once (keyed by employeeId), so the lookup itself
+   *  is left to the caller rather than MessageList assuming DM's shape. */
+  activeToolFor?: (message: Message) => string | undefined;
 }
 
 // Shared sentinel so messages with no reactions all pass the same referentially-stable
@@ -48,7 +51,7 @@ export function MessageList({
   replyCounts,
   onOpenThread,
   onReply,
-  activeTool,
+  activeToolFor,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
@@ -126,7 +129,7 @@ export function MessageList({
             onReply={onReply}
             replyAuthorName={replyAuthorName}
             replySnippet={replySnippet}
-            activeToolName={activeTool?.messageId === m.id ? activeTool.name : undefined}
+            activeToolName={activeToolFor?.(m)}
           />
         );
       })}

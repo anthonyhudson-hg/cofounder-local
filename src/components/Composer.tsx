@@ -320,7 +320,7 @@ export function Composer({
           ) : (
             <span />
           )}
-          {sending ? (
+          {sending && onCancel ? (
             <button className="send-button stop-button" title="Stop" onClick={onCancel}>
               <Stop weight="fill" />
             </button>

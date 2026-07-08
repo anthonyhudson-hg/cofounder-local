@@ -381,15 +381,19 @@ register("command:message.cancel", async (_ctx, inbound) => {
   return { cancelled: cancelTurn(messageId) };
 });
 
-register("command:message.sendChannel", async (ctx, inbound) => {
+register("command:message.sendChannel", async (ctx, inbound, sink) => {
   const payload = p<{ conversationId: string; text: string; replyTo?: { messageId: string; threadRootId: string | null } | null }>(inbound);
-  return sendChannelMessage(ctx, {
-    companyId: requireCompany(inbound),
-    conversationId: payload.conversationId,
-    text: payload.text,
-    replyTo: payload.replyTo ?? null,
-    correlationId: inbound.id,
-  });
+  return sendChannelMessage(
+    ctx,
+    {
+      companyId: requireCompany(inbound),
+      conversationId: payload.conversationId,
+      text: payload.text,
+      replyTo: payload.replyTo ?? null,
+      correlationId: inbound.id,
+    },
+    sink,
+  );
 });
 
 register("query:tokenCount.count", async (_ctx, inbound) => {

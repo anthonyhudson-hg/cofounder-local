@@ -626,9 +626,13 @@ test("sendChannelMessage (full cutover — new server-side orchestration, no cli
     },
   };
 
+  const channelDeltas: { channel: string; data: unknown }[] = [];
+  const channelSink = { delta: (channel: string, data: unknown) => channelDeltas.push({ channel, data }) };
+
   const result = await sendChannelMessage(
     ctx,
     { companyId, conversationId: generalConversationId, text: "@Alice can you take a look?" },
+    channelSink,
     relevanceProvider as never,
     responderProvider as never,
   );
@@ -661,6 +665,16 @@ test("sendChannelMessage (full cutover — new server-side orchestration, no cli
 
   const session = await ctx.db.selectFrom("agent_sessions").where("conversation_id", "=", generalConversationId).where("employee_id", "=", alice.employeeId).selectAll().executeTakeFirst();
   assert.equal(session?.session_id, "sess-chan");
+
+  // Channel turns stream live now, keyed by employeeId (no message row exists
+  // yet while a responder is still deciding whether to post) — not the silent
+  // batch-only behavior from before this fix.
+  const aliceTextDeltas = channelDeltas.filter((d) => d.channel === "channelText" && (d.data as { employeeId: string }).employeeId === alice.employeeId);
+  assert.ok(aliceTextDeltas.length > 0, "Alice's responder streamed at least one channelText delta");
+  const aliceDone = channelDeltas.filter((d) => d.channel === "channelDone" && (d.data as { employeeId: string }).employeeId === alice.employeeId);
+  assert.equal(aliceDone.length, 1, "channelDone fires exactly once for a settled responder");
+  // Bob was relevance-gated out — he never ran a turn, so he gets no deltas at all.
+  assert.ok(!channelDeltas.some((d) => (d.data as { employeeId?: string }).employeeId === bob.employeeId));
 
   await ctx.db.destroy();
 });

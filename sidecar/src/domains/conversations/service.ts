@@ -25,6 +25,39 @@ function isStaleSessionError(err: unknown): boolean {
   return /no conversation found with session/i.test(message);
 }
 
+/**
+ * Shared by both the DM and channel turn loops — registers the turn so
+ * command:message.cancel can reach it, retries once fresh on a stale resume
+ * session, and always unregisters when done. `attempt` owns everything
+ * specific to the caller (building RunTurnOptions, draining the generator,
+ * forwarding chunks to whatever delta channel makes sense for it) — DM and
+ * channel turns stream to different delta shapes (a real message id exists
+ * up front for a DM; a channel responder has no message row until it decides
+ * to post, so it streams keyed by employeeId instead), which is genuinely
+ * different, but the gate/retry/cancel machinery around that isn't and
+ * shouldn't be reimplemented per caller.
+ */
+async function runTurnGated<T>(
+  registryKey: string,
+  resume: string | null,
+  attempt: (resumeSessionId: string | null, abortSignal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const abortController = new AbortController();
+  registerTurn(registryKey, abortController);
+  try {
+    try {
+      return await attempt(resume, abortController.signal);
+    } catch (err) {
+      if (resume && isStaleSessionError(err)) {
+        return await attempt(null, abortController.signal);
+      }
+      throw err;
+    }
+  } finally {
+    unregisterTurn(registryKey);
+  }
+}
+
 /** Lists a company's conversations (scoped). */
 export async function listConversations(ctx: RuntimeContext, companyId: string) {
   return ctx.db
@@ -516,12 +549,6 @@ export async function sendMessage(
   let reaction: { messageId: string; emoji: string } | null = null;
   let full = "";
 
-  // Registered so a later, separate command:message.cancel call can reach in and
-  // abort this specific in-flight turn (see runtime/turnRegistry.ts) — there's no
-  // other way for one IPC call to signal a still-running one.
-  const abortController = new AbortController();
-  registerTurn(assistantMessageId, abortController);
-
   try {
     const provider = providerOverride ?? getProvider(providerName);
 
@@ -533,27 +560,22 @@ export async function sendMessage(
         sink.delta("tool", { messageId: assistantMessageId, name: chunk.name, phase: chunk.phase });
       }
     };
-    const runTurnOpts = (resumeSessionId: string | null) => ({
-      model,
-      effort,
-      systemPrompt,
-      prompt: promptWithNotices,
-      resumeSessionId,
-      memoryWriteTool: { ctx, companyId: input.companyId, employeeId: employee.id, correlationId: input.correlationId ?? null },
-      abortSignal: abortController.signal,
-    });
 
-    let result: TurnResult;
-    try {
-      result = await drainTurn(provider.runTurn(runTurnOpts(resume)), onChunk);
-    } catch (err) {
-      if (resume && isStaleSessionError(err)) {
-        full = ""; // defensive — this failure surfaces before any text streams, but don't assume it
-        result = await drainTurn(provider.runTurn(runTurnOpts(null)), onChunk);
-      } else {
-        throw err;
-      }
-    }
+    const result = await runTurnGated(assistantMessageId, resume, (resumeSessionId, abortSignal) => {
+      full = "";
+      return drainTurn(
+        provider.runTurn({
+          model,
+          effort,
+          systemPrompt,
+          prompt: promptWithNotices,
+          resumeSessionId,
+          memoryWriteTool: { ctx, companyId: input.companyId, employeeId: employee.id, correlationId: input.correlationId ?? null },
+          abortSignal,
+        }),
+        onChunk,
+      );
+    });
 
     const reactMatch = full.match(/\n*\[\[react:(\S+)\]\]\s*$/);
     const finalContent = reactMatch ? full.slice(0, reactMatch.index).trimEnd() : full;
@@ -625,8 +647,6 @@ export async function sendMessage(
         await emit({ companyId: input.companyId, type: "message.errored", subjectId: assistantMessageId, actor: { kind: "system" }, payload: {} });
       });
     }
-  } finally {
-    unregisterTurn(assistantMessageId);
   }
 
   return { userMessageId, assistantMessageId, sessionId, success, errorMessage, reaction };
@@ -766,10 +786,21 @@ export interface SendChannelMessageResult {
  * control-block for whether to post text, which thread/message to reply to,
  * and which reactions to add. `relevanceProviderOverride`/`responderProviderOverride`
  * are for tests.
+ *
+ * Streams the same way a DM does — `sink` is required, not optional, so this
+ * can never silently regress back to batch-only. There's no message row yet
+ * when a responder starts (whether it posts at all depends on parsing its
+ * own control block once the turn finishes), so deltas are keyed by
+ * `employeeId` rather than a message id: "channelText"/"channelTool" carry
+ * live content the same shape as a DM's "text"/"tool" channels, and
+ * "channelDone" tells the client that responder settled (whether or not it
+ * actually posted) so its live-typing preview can be cleared immediately
+ * instead of waiting for the whole batch.
  */
 export async function sendChannelMessage(
   ctx: RuntimeContext,
   input: SendChannelMessageInput,
+  sink: DeltaSink,
   relevanceProviderOverride?: AgentProvider,
   responderProviderOverride?: AgentProvider,
 ): Promise<SendChannelMessageResult> {
@@ -893,33 +924,29 @@ export async function sendChannelMessage(
         const provider = responderProviderOverride ?? getProvider(providerName);
         let fullText = "";
         const onChunk = (chunk: TurnChunk) => {
-          // Channel replies never streamed to the UI before or after the full
-          // cutover (no sink is threaded into sendChannelMessage) — tool-activity
-          // chunks have nowhere to go either, so only text is accumulated here.
-          if (chunk.kind === "text") fullText += chunk.text;
-        };
-        const runTurnOpts = (resume: string | null) => ({
-          model: member.default_model,
-          effort: member.default_effort as Effort,
-          systemPrompt,
-          prompt: promptWithNotices,
-          resumeSessionId: resume,
-          memoryWriteTool: { ctx, companyId: input.companyId, employeeId: member.id, correlationId: input.correlationId ?? null },
-        });
-
-        let result: TurnResult;
-        try {
-          result = await drainTurn(provider.runTurn(runTurnOpts(resumeSessionId)), onChunk);
-        } catch (err) {
-          // Same self-heal as the DM path — a stale stored session must not
-          // permanently break this employee's channel replies either.
-          if (resumeSessionId && isStaleSessionError(err)) {
-            fullText = "";
-            result = await drainTurn(provider.runTurn(runTurnOpts(null)), onChunk);
+          if (chunk.kind === "text") {
+            fullText += chunk.text;
+            sink.delta("channelText", { employeeId: member.id, text: chunk.text });
           } else {
-            throw err;
+            sink.delta("channelTool", { employeeId: member.id, name: chunk.name, phase: chunk.phase });
           }
-        }
+        };
+
+        const result = await runTurnGated(member.id, resumeSessionId, (resume, abortSignal) => {
+          fullText = "";
+          return drainTurn(
+            provider.runTurn({
+              model: member.default_model,
+              effort: member.default_effort as Effort,
+              systemPrompt,
+              prompt: promptWithNotices,
+              resumeSessionId: resume,
+              memoryWriteTool: { ctx, companyId: input.companyId, employeeId: member.id, correlationId: input.correlationId ?? null },
+              abortSignal,
+            }),
+            onChunk,
+          );
+        });
 
         const { control, text } = parseChannelControl(fullText);
 
@@ -970,8 +997,18 @@ export async function sendChannelMessage(
           posted = true;
         }
 
+        sink.delta("channelDone", { employeeId: member.id });
         return { employeeId: member.id, respond: true, posted };
       } catch (err) {
+        sink.delta("channelDone", { employeeId: member.id });
+        if (err instanceof TurnCancelledError) {
+          // No client can trigger this for a channel responder yet (cancel is
+          // DM-only today — see runtime/turnRegistry.ts), but runTurnGated is
+          // shared, so handle it correctly rather than assuming it can't
+          // happen: a stop isn't a failure, and there's no control block to
+          // know where/whether to post, so just end this responder cleanly.
+          return { employeeId: member.id, respond: true, posted: false };
+        }
         // Covers both the turn itself failing and any post-processing step above
         // (session upsert, reactions, message insert) throwing — mirrors the
         // client's catch-and-post-error-message behavior (report §1.2).

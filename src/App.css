@@ -1315,6 +1315,11 @@ body {
   display: flex;
   align-items: baseline;
   gap: 8px;
+  /* A drag-select spanning several messages should copy the messages' actual
+     text, not this row's author/time/model chrome too — selecting across N
+     messages was pulling in N× this metadata, ballooning a handful of short
+     messages into a huge paste (every real chat app excludes this). */
+  user-select: none;
 }
 
 .message-author {
@@ -1442,6 +1447,7 @@ body {
   margin-top: 4px;
   font-size: 0.72rem;
   color: #9a9a9a;
+  user-select: none;
 }
 
 .message-error {
@@ -1455,12 +1461,14 @@ body {
   color: #9a9a9a;
   font-size: 0.85rem;
   font-style: italic;
+  user-select: none;
 }
 
 .reaction-badges {
   display: flex;
   gap: 6px;
   margin-top: 6px;
+  user-select: none;
 }
 
 .reaction-badge {
@@ -1496,6 +1504,7 @@ body {
   opacity: 0;
   pointer-events: none;
   position: absolute;
+  user-select: none;
   top: -14px;
   right: 12px;
   background: #fff;
@@ -1724,6 +1733,7 @@ body {
   color: #8a8a8a;
   font-size: 0.82rem;
   font-style: italic;
+  user-select: none;
 }
 
 .tool-activity-spinner {
@@ -2446,6 +2456,7 @@ body {
   font-weight: 600;
   cursor: pointer;
   padding: 0;
+  user-select: none;
 }
 
 .thread-replies-btn:hover {
@@ -2458,6 +2469,7 @@ body {
   border-left: 2px solid #ddd;
   padding-left: 8px;
   margin-bottom: 2px;
+  user-select: none;
 }
 
 .composer-reply-bar {
