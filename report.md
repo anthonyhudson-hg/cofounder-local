@@ -9,9 +9,9 @@ Severity key: **CRITICAL** (data loss / total feature death) · **HIGH** (real, 
 ## Part 0 — If you fix nothing else, fix these
 
 1. [x] **DONE** — **Every sidecar/runtime IPC call can hang forever, with zero timeout, anywhere in the stack.** (§1.1)
-2. **The vault's fallback master key gets written to the OS temp directory.** Wipe temp, lose every secret permanently. (§2.1)
+2. [x] **DONE** — **The vault's fallback master key gets written to the OS temp directory.** Wipe temp, lose every secret permanently. (§2.1)
 3. **The GitHub tool lets an agent point `git add -A && git push` at any directory on disk and exfiltrate it with a stored PAT**, and the human approval prompt shows raw JSON, not a diff. (§2.2)
-4. **CSP is fully disabled** (`"csp": null`) in an app that renders LLM-generated (and thus prompt-injectable) markdown. (§2.3)
+4. [x] **DONE** — **CSP is fully disabled** (`"csp": null`) in an app that renders LLM-generated (and thus prompt-injectable) markdown. (§2.3)
 5. [x] **DONE** — **Manager-cycle validation is cosmetic.** The frontend blocks direct-report cycles only; the backend validates nothing. A 2+ hop cycle (A→C→B→A) is fully achievable and makes employees vanish from the org chart with no error. (§4.1)
 6. **The sidecar/runtime child processes have no crash detection, no restart, and can be orphaned on app exit.** One crash = silently dead AI chat for the rest of the session, surfaced only as a raw broken-pipe error. (§4.2)
 7. **Codex's "no tools" sandboxing claim is false**, and `CodexProvider.runTurn` unconditionally reports `success: true` even when nothing observably succeeded. (§4.3, §4.4)
@@ -96,7 +96,10 @@ These patterns repeat across many files. Fix the pattern once instead of patchin
 
 ## Part 2 — Security
 
-### 2.1 — Vault master-key fallback lands in `os.tmpdir()` — HIGH
+### 2.1 — Vault master-key fallback lands in `os.tmpdir()` — HIGH — ✅ DONE
+
+**Fix applied:** `keyFilePath()` now defaults to `path.dirname(resolveDbPath())` (the real, stable app-config dir) instead of `os.tmpdir()`. First-use key creation (both the keychain and file paths) is now serialized across processes via an O_EXCL lock file with stale-lock takeover, closing the TOCTOU race. A caught keychain failure now logs why before falling back to the file store. `vault.ts`'s `getSecret` catches AES-GCM decrypt failures and rethrows a typed `SecretCorruptedError` instead of letting the raw crypto error propagate. `getMasterKey()` is now cached in-process instead of re-hitting the OS keychain on every seal/open call. All 7 sidecar tests (including the vault-exercising leakage-invariant and github-connector proof-of-life tests) still pass.
+
 **File:** `sidecar/src/secrets/keychain.ts:9-13, 36-39`
 
 The docstring claims the fallback is "a 0600 key file beside the DB." The actual code: `keyFilePath()` resolves to `process.env.COFOUNDER_KEY_DIR || os.tmpdir()`. Grep confirms `COFOUNDER_KEY_DIR` is never set anywhere — `src-tauri/src/sidecar.rs` only sets `COFOUNDER_DB_PATH`. So whenever the OS keychain path fails (missing/failed native `@napi-rs/keyring` binding, locked credential store, headless environment) the master key gets silently written to a directory the OS is explicitly allowed to wipe (Disk Cleanup, temp-file cleaners, container restarts). If that file goes, every row in `secrets` (GitHub PAT, provider API keys) becomes permanently undecryptable — AES-GCM auth-tag check fails on every future `open()`.
@@ -127,7 +130,10 @@ Related, same file:
 - **MEDIUM — hardcoded `--no-gpg-sign`** (36): silently overrides repo/user signing policy with no opt-out.
 - **MEDIUM — no "nothing to commit" / partial-failure handling** (35-48): a no-op commit throws a raw git-stderr exception; a local-commit-then-failed-push leaves the caller with no signal that a commit already happened, so a naive retry fails again with a confusing "nothing to commit."
 
-### 2.3 — CSP fully disabled — HIGH
+### 2.3 — CSP fully disabled — HIGH — ✅ DONE
+
+**Fix applied:** `tauri.conf.json`'s `security.csp` is now `default-src 'self'; img-src 'self' data: https://randomuser.me; style-src 'self' 'unsafe-inline'; connect-src 'self' https://randomuser.me; font-src 'self'` — scoped to exactly what the app actually loads (bundled assets, avatar data URLs, candidate photos and the `fetch()` call to randomuser.me during hiring).
+
 **File:** `src-tauri/tauri.conf.json:27` — `"csp": null`
 
 This app renders LLM-generated markdown (react-markdown + remark-gfm) from agents that can themselves be prompt-injected via tool output. There is currently no raw-HTML rendering path (see §2.4 — good), but zero CSP means zero defense-in-depth if that ever changes (a future `rehype-raw` addition, a markdown-injection edge case). Combined with `send_to_runtime`'s unvalidated passthrough to the DB-owning process (§1.4) and full IPC bridge access (`cos_send`, `opener:default`, `notification:default`), any future XSS has an unobstructed path to real damage.

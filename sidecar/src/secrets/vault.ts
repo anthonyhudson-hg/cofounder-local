@@ -5,6 +5,16 @@ import { getMasterKey } from "./keychain";
 
 const ALGO = "aes-256-gcm";
 
+/** Thrown by `getSecret` when a stored secret can't be decrypted — wrong/rotated master
+ *  key, or corrupted ciphertext — instead of letting the raw AES-GCM auth-tag error
+ *  propagate uncaught out of whatever tool/connector called it (report §2.1). */
+export class SecretCorruptedError extends Error {
+  constructor(name: string, cause: unknown) {
+    super(`secret "${name}" could not be decrypted (wrong or rotated master key?)`, { cause });
+    this.name = "SecretCorruptedError";
+  }
+}
+
 interface Sealed {
   ciphertext: string; // base64(encrypted || authTag)
   nonce: string; // base64(12-byte iv)
@@ -65,5 +75,9 @@ export async function getSecret(ctx: RuntimeContext, companyId: string, name: st
     .select(["ciphertext", "nonce"])
     .executeTakeFirst();
   if (!row) return null;
-  return open({ ciphertext: row.ciphertext, nonce: row.nonce });
+  try {
+    return open({ ciphertext: row.ciphertext, nonce: row.nonce });
+  } catch (err) {
+    throw new SecretCorruptedError(name, err);
+  }
 }
