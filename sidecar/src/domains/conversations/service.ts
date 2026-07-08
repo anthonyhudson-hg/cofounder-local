@@ -337,6 +337,8 @@ export interface SendMessageInput {
   provider?: string | null;
   /** Replying inside an existing thread, mirroring the client's ReplyTarget. */
   replyTo?: { messageId: string; threadRootId: string | null } | null;
+  /** The originating command's id, for correlating tool.invoked/etc. events emitted mid-turn back to this send. */
+  correlationId?: string | null;
 }
 
 export interface SendMessageResult {
@@ -502,7 +504,14 @@ export async function sendMessage(
     const provider = providerOverride ?? getProvider(providerName);
     let full = "";
     const result = await drainTurn(
-      provider.runTurn({ model, effort, systemPrompt, prompt: promptWithNotices, resumeSessionId: resume }),
+      provider.runTurn({
+        model,
+        effort,
+        systemPrompt,
+        prompt: promptWithNotices,
+        resumeSessionId: resume,
+        memoryWriteTool: { ctx, companyId: input.companyId, employeeId: employee.id, correlationId: input.correlationId ?? null },
+      }),
       (chunk) => {
         full += chunk;
         sink.delta("text", { messageId: assistantMessageId, text: chunk });
@@ -674,6 +683,8 @@ export interface SendChannelMessageInput {
   conversationId: string;
   text: string;
   replyTo?: { messageId: string; threadRootId: string | null } | null;
+  /** The originating command's id, for correlating tool.invoked/etc. events emitted mid-turn back to this send. */
+  correlationId?: string | null;
 }
 
 export interface ChannelResponderOutcome {
@@ -821,7 +832,14 @@ export async function sendChannelMessage(
         const provider = responderProviderOverride ?? getProvider(providerName);
         let fullText = "";
         const result = await drainTurn(
-          provider.runTurn({ model: member.default_model, effort: member.default_effort as Effort, systemPrompt, prompt: promptWithNotices, resumeSessionId }),
+          provider.runTurn({
+            model: member.default_model,
+            effort: member.default_effort as Effort,
+            systemPrompt,
+            prompt: promptWithNotices,
+            resumeSessionId,
+            memoryWriteTool: { ctx, companyId: input.companyId, employeeId: member.id, correlationId: input.correlationId ?? null },
+          }),
           (text) => {
             fullText += text;
           },

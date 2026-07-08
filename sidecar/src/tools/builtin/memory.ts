@@ -3,8 +3,8 @@ import { mutate } from "../../runtime/unitOfWork";
 import { registerTool } from "../registry";
 import type { Tool, ToolContext } from "../types";
 
-type MemoryKind = "working" | "long" | "episodic" | "semantic";
-const MEMORY_KINDS: readonly MemoryKind[] = ["working", "long", "episodic", "semantic"];
+export const MEMORY_KINDS = ["working", "long", "episodic", "semantic"] as const;
+export type MemoryKind = (typeof MEMORY_KINDS)[number];
 
 interface WriteInput {
   key: string;

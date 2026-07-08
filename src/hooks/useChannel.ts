@@ -121,7 +121,15 @@ export function useChannel(conversationId: string, companyId: string, onActivity
       } finally {
         // Channel replies (and any reactions responders added) only exist once
         // the whole turn settles — reload picks up everything in one shot.
-        await reload();
+        // reload() can itself reject (timeout, backend error); that must never
+        // suppress setSending(false) below or the composer gets stuck read-only
+        // even though the turn already completed (see useConversation.ts's
+        // identical guard for the same failure mode).
+        try {
+          await reload();
+        } catch {
+          // Swallowed — the next successful reload will catch the DB up.
+        }
         setSending(false);
       }
     },

@@ -160,6 +160,31 @@ describe("useConversation", () => {
     expect(mockedQuery).toHaveBeenCalledWith("messages.list", { conversationId: "conv-1" }, null);
   });
 
+  it("send(): the post-turn reload() itself rejecting still clears sending (composer must not get stuck read-only)", async () => {
+    mockedCommandStreaming.mockResolvedValue({
+      userMessageId: "u1",
+      assistantMessageId: "a1",
+      sessionId: null,
+      success: true,
+      reaction: null,
+    });
+
+    const { result } = renderHook(() => useConversation("conv-1", "co-1", employee));
+    await waitFor(() => expect(mockedQuery).toHaveBeenCalled());
+
+    // The turn itself succeeds; the reconciliation reload() that runs
+    // afterward is what fails this time (timeout, backend error, etc).
+    mockedQuery.mockImplementation(async (type: string) => {
+      throw new Error(`reload failed: ${type}`);
+    });
+
+    await act(async () => {
+      await result.current.send("hi", "claude-sonnet-5", "medium");
+    });
+
+    expect(result.current.sending).toBe(false);
+  });
+
   it("send(): a reaction on the result triggers a reactions reload", async () => {
     mockedCommandStreaming.mockResolvedValue({
       userMessageId: "u1",

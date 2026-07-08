@@ -16,6 +16,7 @@ import { invokeTool } from "../tools/registry";
 import { resolveApproval } from "../domains/approvals/service";
 import { storeSecret, getSecret } from "../secrets/vault";
 import { companyWorkspaceRoot } from "../connectors/workspace";
+import { buildMemoryWriteToolDef } from "../providers/claudeMemoryTool";
 
 function freshCtx(): RuntimeContext {
   const p = path.join(os.tmpdir(), `cf-test-${randomUUID()}.db`);
@@ -624,6 +625,48 @@ test("dispatch: validateInbound rejects malformed messages before dispatch() eve
       ),
     /no handler for query:not-a-real-handler/,
   );
+
+  await ctx.db.destroy();
+});
+
+test("claudeMemoryTool: memory_write MCP handler goes through the real capability gate (deny/approval/allow)", async () => {
+  const ctx = freshCtx();
+  const { id: companyId, cosEmployeeId: emp } = await createCompany(ctx, { name: "Acme" }, { kind: "user" });
+
+  // Stub of the SDK's own tool() — we only need it to hand back the handler
+  // so we can drive it directly, without touching the real Claude SDK.
+  const stubToolFn = ((
+    _name: string,
+    _desc: string,
+    _schema: unknown,
+    handler: (args: unknown, extra: unknown) => Promise<unknown>,
+  ) => ({ handler })) as unknown as Parameters<typeof buildMemoryWriteToolDef>[0];
+
+  const def = buildMemoryWriteToolDef(stubToolFn, { ctx, companyId, employeeId: emp });
+
+  // No grant at all -> capability denied, surfaced as an error-flagged result,
+  // not an uncaught throw (an MCP handler throwing would crash the SDK's turn).
+  const denied = await def.handler({ key: "k1", value: "v1", kind: undefined }, {});
+  assert.equal(denied.isError, true);
+  assert.match((denied.content[0] as { text: string }).text, /Could not save this memory/);
+  assert.match((denied.content[0] as { text: string }).text, /capability denied/);
+
+  // Grant capped at "read" -> write-internal exceeds it -> queued for approval,
+  // not silently executed and not a hard error.
+  await grantCapability(ctx, companyId, emp, "tool:memory", "read");
+  const pending = await def.handler({ key: "k2", value: "v2", kind: undefined }, {});
+  assert.equal(pending.isError, true);
+  assert.match((pending.content[0] as { text: string }).text, /queued/);
+  assert.match((pending.content[0] as { text: string }).text, /has NOT happened yet/);
+
+  // Grant covers write-internal -> actually executes, same as the direct
+  // tool.invoke IPC path.
+  await grantCapability(ctx, companyId, emp, "tool:memory", "write-internal");
+  const ok = await def.handler({ key: "k3", value: "v3", kind: undefined }, {});
+  assert.equal(ok.isError, undefined);
+  assert.equal((ok.content[0] as { text: string }).text, "Saved.");
+  const row = await ctx.db.selectFrom("agent_memory").where("mem_key", "=", "k3").selectAll().executeTakeFirstOrThrow();
+  assert.equal(row.value, "v3");
 
   await ctx.db.destroy();
 });

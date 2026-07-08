@@ -161,7 +161,15 @@ export function useConversation(
         // what the server actually persisted, so reactions/thread-replies keyed
         // by id would silently break without this (same class of bug as the
         // §1.2 stuck-sending fix, now for id drift instead of a stuck flag).
-        await reload();
+        // reload() itself can reject (timeout, backend error) — it must never
+        // suppress the sending-flag reset below, or the composer gets stuck
+        // read-only until the app restarts even though the turn itself succeeded.
+        try {
+          await reload();
+        } catch {
+          // Swallowed — the next successful reload (another send, or a manual
+          // one) will catch the DB up; a stuck composer is worse than a stale one.
+        }
         useAgentActivity.getState().setActive(employee.id, false);
         setSending(false);
       }

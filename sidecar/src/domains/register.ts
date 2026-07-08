@@ -340,6 +340,7 @@ register("command:message.send", async (ctx, inbound, sink) => {
       effort: validateEffort(payload.effort),
       provider: payload.provider ?? null,
       replyTo: payload.replyTo ?? null,
+      correlationId: inbound.id,
     },
     sink,
   );
@@ -352,6 +353,7 @@ register("command:message.sendChannel", async (ctx, inbound) => {
     conversationId: payload.conversationId,
     text: payload.text,
     replyTo: payload.replyTo ?? null,
+    correlationId: inbound.id,
   });
 });
 

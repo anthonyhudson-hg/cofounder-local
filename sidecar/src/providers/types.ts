@@ -1,3 +1,5 @@
+import type { ToolContext } from "../tools/types";
+
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export type ProviderName = "claude" | "codex";
@@ -30,6 +32,18 @@ export interface RunTurnOptions {
    * Unset by default; opt-in, so no existing caller's behavior changes.
    */
   timeoutMs?: number;
+  /**
+   * When present, exposes an in-process `memory.write` tool for this turn,
+   * gated through the same capability/approval machinery as `tool.invoke`
+   * (tools/registry.ts's `invokeTool`) — an agent with no standing grant gets
+   * a clean "capability denied" tool result, same as the direct IPC path.
+   * Claude-only: `@openai/codex-sdk` has no mechanism for the calling process
+   * to register custom tools, so CodexProvider ignores this field entirely
+   * (see providers/codex.ts). Deliberately scoped to memory.write only, not
+   * the full tool registry — every other tool stays reachable only via
+   * `command:tool.invoke`.
+   */
+  memoryWriteTool?: ToolContext;
 }
 
 export interface TurnResult {

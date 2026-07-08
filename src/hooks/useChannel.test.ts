@@ -122,6 +122,27 @@ describe("useChannel", () => {
     expect(mockedQuery).toHaveBeenCalledWith("messages.list", { conversationId: "chan-1" }, null);
   });
 
+  it("send(): the post-turn reload() itself rejecting still clears sending (composer must not get stuck read-only)", async () => {
+    mockedCommandStreaming.mockResolvedValue({ userMessageId: "u1", responders: [] });
+
+    const { result } = renderHook(() => useChannel("chan-1", "co-1"));
+    await waitFor(() => expect(result.current.members).toHaveLength(1));
+
+    // The turn itself succeeds; the reconciliation reload() that runs
+    // afterward is what fails this time (timeout, backend error, etc). Unlike
+    // the hard-rejection case above, this must NOT propagate — reload()'s own
+    // failure is swallowed so it can never suppress the sending-flag reset.
+    mockedQuery.mockImplementation(async (type: string) => {
+      throw new Error(`reload failed: ${type}`);
+    });
+
+    await act(async () => {
+      await result.current.send("hey team");
+    });
+
+    expect(result.current.sending).toBe(false);
+  });
+
   it("send(): does nothing when the channel has no members", async () => {
     mockQueries([]);
     const { result } = renderHook(() => useChannel("chan-1", "co-1"));

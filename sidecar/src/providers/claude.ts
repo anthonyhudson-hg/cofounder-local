@@ -1,5 +1,6 @@
 import type { query } from "@anthropic-ai/claude-agent-sdk";
 import { AgentProvider, RunTurnOptions, TurnResult, UsagePayload, ZERO_USAGE } from "./types";
+import { buildMemoryWriteToolDef, MEMORY_WRITE_ALLOWED_TOOL, MEMORY_WRITE_MCP_SERVER_NAME } from "./claudeMemoryTool";
 
 /**
  * Claude Code / Claude Agent SDK provider. This is the original Chief of Staff
@@ -19,22 +20,22 @@ const dynamicImport = new Function("specifier", "return import(specifier)") as (
   specifier: string,
 ) => Promise<typeof import("@anthropic-ai/claude-agent-sdk")>;
 
-let queryFnPromise: Promise<typeof query> | null = null;
-function getQuery(): Promise<typeof query> {
-  if (!queryFnPromise) {
-    queryFnPromise = dynamicImport("@anthropic-ai/claude-agent-sdk").then((mod) => mod.query);
-    // Mirrors codex.ts: don't cache a failed import forever — a transient FS
-    // hiccup shouldn't require a full app restart to recover from.
-    queryFnPromise.catch(() => {
-      queryFnPromise = null;
+let sdkPromise: Promise<typeof import("@anthropic-ai/claude-agent-sdk")> | null = null;
+function getSdk(): Promise<typeof import("@anthropic-ai/claude-agent-sdk")> {
+  if (!sdkPromise) {
+    sdkPromise = dynamicImport("@anthropic-ai/claude-agent-sdk");
+    // Don't cache a failed import forever — a transient FS hiccup shouldn't
+    // require a full app restart to recover from.
+    sdkPromise.catch(() => {
+      sdkPromise = null;
     });
   }
-  return queryFnPromise;
+  return sdkPromise;
 }
 
 export class ClaudeProvider implements AgentProvider {
   async *runTurn(opts: RunTurnOptions): AsyncGenerator<string, TurnResult, void> {
-    const query = await getQuery();
+    const { query, tool, createSdkMcpServer } = await getSdk();
     let sessionId: string | undefined;
     let usage: UsagePayload = { ...ZERO_USAGE };
     let totalCostUsd = 0;
@@ -49,6 +50,21 @@ export class ClaudeProvider implements AgentProvider {
     const abortController = new AbortController();
     const timer = opts.timeoutMs ? setTimeout(() => abortController.abort(), opts.timeoutMs) : null;
 
+    // Only wire the memory-write tool in (and thus only allow it) when the
+    // caller opted in — turns without a memoryWriteTool (e.g. the internal
+    // channel-relevance check) run exactly as before, with zero tools.
+    const toolOptions = opts.memoryWriteTool
+      ? {
+          allowedTools: [MEMORY_WRITE_ALLOWED_TOOL],
+          mcpServers: {
+            [MEMORY_WRITE_MCP_SERVER_NAME]: createSdkMcpServer({
+              name: MEMORY_WRITE_MCP_SERVER_NAME,
+              tools: [buildMemoryWriteToolDef(tool, opts.memoryWriteTool)],
+            }),
+          },
+        }
+      : { allowedTools: [] };
+
     try {
       for await (const message of query({
         prompt: opts.prompt,
@@ -57,7 +73,7 @@ export class ClaudeProvider implements AgentProvider {
           effort: opts.effort,
           systemPrompt: opts.systemPrompt,
           resume: opts.resumeSessionId ?? undefined,
-          allowedTools: [],
+          ...toolOptions,
           abortController,
         },
       })) {
