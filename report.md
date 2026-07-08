@@ -143,7 +143,10 @@ This app renders LLM-generated markdown (react-markdown + remark-gfm) from agent
 
 **Fix:** set an explicit policy, e.g. `"csp": "default-src 'self'; img-src 'self' data: https://randomuser.me; style-src 'self' 'unsafe-inline'; connect-src 'self' https://randomuser.me"`.
 
-### 2.4 — Mention injection breaks out of markdown link syntax, reaching an unrestricted `openUrl` sink — MEDIUM-HIGH
+### 2.4 — Mention injection breaks out of markdown link syntax, reaching an unrestricted `openUrl` sink — MEDIUM-HIGH — ✅ DONE
+
+**Fix applied:** `injectMentionLinks` now escapes `\`, `[`, `]` in mention text before splicing it into `[text](url)` syntax (`escapeMarkdownLinkText`), so a crafted mention can no longer close the link text early and inject an arbitrary href. `openUrl` is now gated by `isSafeExternalUrl`, an allowlist of `http:`/`https:`/`mailto:` schemes (anything else is blocked with a console warning, not opened). `Sidebar.tsx`'s channel-name input was already restricted to `[a-z0-9-]` as part of an earlier pass in this session (defense in depth at the entry point).
+
 **Files:** `src/components/MarkdownContent.tsx:8-22` (injection point), `52-62` (sink), `src/components/Sidebar.tsx:103` (root cause / entry point)
 
 Good news first: no `dangerouslySetInnerHTML`, no `rehype-raw` — literal `<script>`-in-message injection is not exploitable here.

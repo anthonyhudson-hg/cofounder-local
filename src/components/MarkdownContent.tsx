@@ -5,6 +5,30 @@ import { findMentions, MentionTarget } from "../lib/mentions";
 
 const MENTION_SCHEME = "cofounder-mention";
 
+// Only these schemes may be opened via the OS handler. This app renders AI-generated
+// markdown (which can itself be prompt-injected via tool output), so a crafted
+// `[click here](file:///...)` or a locally-registered custom URI scheme must not be
+// opened with a single click and zero warning (report §2.4).
+const ALLOWED_URL_SCHEMES = new Set(["http:", "https:", "mailto:"]);
+
+function isSafeExternalUrl(href: string): boolean {
+  try {
+    return ALLOWED_URL_SCHEMES.has(new URL(href).protocol);
+  } catch {
+    return false;
+  }
+}
+
+// Escapes markdown control characters in mention text before it's spliced into
+// `[text](url)` link syntax. Without this, a channel/employee name containing e.g.
+// `]( javascript:... )[` could break out of the intended link text and inject an
+// attacker-chosen href into a real, clickable link (report §2.4) — channel names are
+// now also restricted to a safe charset at creation time (see Sidebar.tsx) as
+// defense in depth, but this is the layer that actually prevents the injection.
+function escapeMarkdownLinkText(text: string): string {
+  return text.replace(/([\\[\]])/g, "\\$1");
+}
+
 function injectMentionLinks(content: string, targets: MentionTarget[]): string {
   const matches = findMentions(content, targets);
   if (matches.length === 0) return content;
@@ -14,7 +38,7 @@ function injectMentionLinks(content: string, targets: MentionTarget[]): string {
   for (const m of matches) {
     result += content.slice(cursor, m.start);
     const raw = content.slice(m.start, m.end);
-    result += `[${raw}](${MENTION_SCHEME}:${m.type}:${encodeURIComponent(m.target.conversationId)})`;
+    result += `[${escapeMarkdownLinkText(raw)}](${MENTION_SCHEME}:${m.type}:${encodeURIComponent(m.target.conversationId)})`;
     cursor = m.end;
   }
   result += content.slice(cursor);
@@ -54,7 +78,9 @@ export function MarkdownContent({ content, targets, onMentionClick }: Props) {
                 href={href}
                 onClick={(e) => {
                   e.preventDefault();
-                  if (href) void openUrl(href);
+                  if (!href) return;
+                  if (isSafeExternalUrl(href)) void openUrl(href);
+                  else console.warn(`Blocked opening a link with a disallowed scheme: ${href}`);
                 }}
               >
                 {children}
