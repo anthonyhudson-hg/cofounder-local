@@ -10,17 +10,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_http::init())
-        .manage(sidecar::SidecarState::new())
         .manage(sidecar::RuntimeState::new())
-        .invoke_handler(tauri::generate_handler![
-            sidecar::cos_send,
-            sidecar::cos_count_tokens,
-            sidecar::cos_check_relevance,
-            sidecar::cos_send_channel,
-            sidecar::send_to_runtime
-        ])
+        .invoke_handler(tauri::generate_handler![sidecar::send_to_runtime])
         .setup(|app| {
-            sidecar::spawn(app.handle().clone());
             sidecar::spawn_runtime(app.handle().clone());
             Ok(())
         })

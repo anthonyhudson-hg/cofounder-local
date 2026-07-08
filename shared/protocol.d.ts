@@ -6,7 +6,7 @@
  * Everything is newline-delimited JSON over the Tauri IPC bridge:
  *
  *   client  --invoke("send_to_runtime", RuntimeInbound)-->  Rust --stdin-->  runtime
- *   runtime --stdout--> Rust --emit("cos://event", RuntimeOutbound)--> client
+ *   runtime --stdout--> Rust --emit("runtime://event", RuntimeOutbound)--> client
  *
  * This module is TYPE-ONLY (a .d.ts) so it can be imported by both the ESM
  * client and the CommonJS sidecar without coupling their build systems.
