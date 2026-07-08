@@ -3,7 +3,12 @@ import type { RuntimeContext } from "../../runtime/context";
 import type { DeltaSink } from "../../runtime/dispatch";
 import { mutate } from "../../runtime/unitOfWork";
 import { buildIdentityBlock, composeSystemPrompt } from "../../runtime/promptBuilder";
+import { formatReactionNoticesForPrompt } from "../../runtime/reactionFormatting";
+import { findMentions, type MentionTarget } from "../../runtime/mentions";
+import { modelProvider } from "../../runtime/models";
 import { getProvider, drainTurn, type AgentProvider, type Effort } from "../../providers";
+import { resolveManagerName, employeeDisplayName, listChannelMembers, listResponsibilities } from "../employees/service";
+import { getUserProfile } from "../settings/service";
 
 /** Lists a company's conversations (scoped). */
 export async function listConversations(ctx: RuntimeContext, companyId: string) {
@@ -330,14 +335,36 @@ export interface SendMessageInput {
   model?: string;
   effort?: Effort;
   provider?: string | null;
+  /** Replying inside an existing thread, mirroring the client's ReplyTarget. */
+  replyTo?: { messageId: string; threadRootId: string | null } | null;
+}
+
+export interface SendMessageResult {
+  userMessageId: string;
+  assistantMessageId: string;
+  sessionId: string | null;
+  success: boolean;
+  errorMessage?: string;
+  /** Set when the model closed its reply with a `[[react:emoji]]` suffix. */
+  reaction: { messageId: string; emoji: string } | null;
 }
 
 /**
  * The DM turn loop, relocated from the client's useConversation.send into the
- * runtime (refactor #2/#7). Persists the user message, composes the system
+ * runtime (refactor #2/#7). Full parity with that client flow (full cutover):
+ * reply-threading, manager-name resolution, mention-scope + reaction-suffix
+ * prompt injection, reaction-notices consumption, `[[react:emoji]]` parsing,
+ * and a full debug payload. Persists the user message, composes the system
  * prompt from company + employee, drives the provider (streaming text deltas to
  * the client via `sink`), then persists the assistant message and resumes the
  * provider session. Emits message.created (x2) + message.completed.
+ *
+ * A failure driving the provider (thrown error, not just a graceful
+ * `result.success: false`) is caught here and persisted as a normal error
+ * message instead of rejecting the whole command — the legacy client-side flow
+ * only left the message errored in local state with nothing in the DB, so a
+ * reload used to silently drop back to "streaming" forever (a real gap this
+ * closes, not just a port).
  *
  * `providerOverride` is for tests; production resolves via getProvider().
  */
@@ -346,7 +373,7 @@ export async function sendMessage(
   input: SendMessageInput,
   sink: DeltaSink,
   providerOverride?: AgentProvider,
-): Promise<{ userMessageId: string; assistantMessageId: string; sessionId: string | null }> {
+): Promise<SendMessageResult> {
   await assertConversationInCompany(ctx, input.companyId, input.conversationId);
 
   const conv = await ctx.db
@@ -379,78 +406,477 @@ export async function sendMessage(
       .execute()
   ).map((r) => r.text);
 
-  const userFullName =
-    (await ctx.db.selectFrom("settings").where("key", "=", "user_full_name").select("value").executeTakeFirst())
-      ?.value ?? "";
+  const { userFullName } = await getUserProfile(ctx);
 
   const model = input.model ?? employee.default_model;
   const effort = (input.effort ?? employee.default_effort) as Effort;
   const providerName = input.provider ?? "claude";
+  const resume = conv.session_provider === providerName ? conv.session_id : null;
 
-  // 1. persist the user message
+  // 1. persist the user message (optionally inside an existing thread)
   const userMessageId = randomUUID();
+  const userThreadRootId = input.replyTo ? input.replyTo.threadRootId ?? input.replyTo.messageId : null;
   await mutate(ctx, async (trx, emit) => {
     await trx
       .insertInto("messages")
-      .values({ id: userMessageId, conversation_id: input.conversationId, role: "user", content: input.text, status: "complete" })
+      .values({
+        id: userMessageId,
+        conversation_id: input.conversationId,
+        role: "user",
+        content: input.text,
+        status: "complete",
+        thread_root_id: userThreadRootId,
+        reply_to_message_id: input.replyTo?.messageId ?? null,
+      })
       .execute();
     await emit({ companyId: input.companyId, type: "message.created", subjectId: userMessageId, actor: { kind: "user" }, payload: { role: "user", conversationId: input.conversationId } });
   });
 
-  // 2. compose system prompt
-  const identity = buildIdentityBlock(conv.name, employee, userFullName || "the founder");
-  const systemPrompt = composeSystemPrompt(company.profile, company.system_prompt, identity, employee, responsibilities);
+  // 2. compose system prompt (identity + DM-scoped mention/reaction guidance)
+  const managerName = await resolveManagerName(ctx, employee.manager_employee_id, userFullName);
+  const identity = buildIdentityBlock(conv.name, employee, managerName);
+  const baseSystemPrompt = composeSystemPrompt(company.profile, company.system_prompt, identity, employee, responsibilities);
+  const mentionScope = `This is a private 1:1 DM between you and ${userFullName || "the founder"}. There is nobody else here to @mention — do not @mention any other employee in this conversation.`;
+  const systemPrompt = `${baseSystemPrompt}\n\n---\n\n${mentionScope}\n\n---\n\nIf the message you're replying to deserves a quick reaction in addition to (or instead of, if you have nothing to add) a full reply, end your response with a line like [[react:👍]] using one relevant emoji. Omit this entirely if no reaction is warranted.`;
 
-  // 3. insert streaming assistant placeholder
+  // 3. consume reaction notices since this employee's last turn
+  const rawNotices = await consumeReactionNotices(ctx, employee.id, userFullName);
+  const { notices, block: noticesBlock } = formatReactionNoticesForPrompt(rawNotices);
+  const promptWithNotices = noticesBlock ? `${noticesBlock}\n\n${input.text}` : input.text;
+
+  const debugPayload = JSON.stringify({
+    model,
+    effort,
+    companySystemPrompt: company.system_prompt,
+    companyProfile: company.profile,
+    identityBlock: identity,
+    mission: employee.mission,
+    preamble: employee.preamble,
+    responsibilities,
+    additionalDetails: employee.additional_details,
+    prompt: promptWithNotices,
+    reactionNotices: notices,
+    resumeSessionId: resume,
+    sentAt: new Date().toISOString(),
+  });
+
+  // 4. insert streaming assistant placeholder
   const assistantMessageId = randomUUID();
   await mutate(ctx, async (trx, emit) => {
     await trx
       .insertInto("messages")
-      .values({ id: assistantMessageId, conversation_id: input.conversationId, role: "assistant", content: "", model, effort, status: "streaming", author_employee_id: employee.id })
+      .values({
+        id: assistantMessageId,
+        conversation_id: input.conversationId,
+        role: "assistant",
+        content: "",
+        model,
+        effort,
+        status: "streaming",
+        debug_payload: debugPayload,
+        thread_root_id: userThreadRootId,
+        author_employee_id: employee.id,
+      })
       .execute();
     await emit({ companyId: input.companyId, type: "message.created", subjectId: assistantMessageId, actor: { kind: "employee", employeeId: employee.id }, payload: { role: "assistant", conversationId: input.conversationId } });
   });
 
-  // 4. run the provider, streaming text deltas
-  const resume = conv.session_provider === providerName ? conv.session_id : null;
-  const provider = providerOverride ?? getProvider(providerName);
-  let full = "";
-  const result = await drainTurn(
-    provider.runTurn({ model, effort, systemPrompt, prompt: input.text, resumeSessionId: resume }),
-    (chunk) => {
-      full += chunk;
-      sink.delta("text", { messageId: assistantMessageId, text: chunk });
-    },
-  );
+  // 5. run the provider, streaming text deltas; a thrown error here is caught
+  // and persisted as a normal error message rather than failing the command.
+  let success: boolean;
+  let errorMessage: string | undefined;
+  let sessionId: string | null = resume;
+  let reaction: { messageId: string; emoji: string } | null = null;
 
-  // 5. persist final assistant message + resume the session
+  try {
+    const provider = providerOverride ?? getProvider(providerName);
+    let full = "";
+    const result = await drainTurn(
+      provider.runTurn({ model, effort, systemPrompt, prompt: promptWithNotices, resumeSessionId: resume }),
+      (chunk) => {
+        full += chunk;
+        sink.delta("text", { messageId: assistantMessageId, text: chunk });
+      },
+    );
+
+    const reactMatch = full.match(/\n*\[\[react:(\S+)\]\]\s*$/);
+    const finalContent = reactMatch ? full.slice(0, reactMatch.index).trimEnd() : full;
+
+    success = result.success;
+    errorMessage = result.success ? undefined : (result.errorMessage ?? "The assistant did not complete this response.");
+    sessionId = result.sessionId ?? resume;
+
+    await mutate(ctx, async (trx, emit) => {
+      await trx
+        .updateTable("messages")
+        .set({
+          content: finalContent,
+          status: result.success ? "complete" : "error",
+          // Previously left null on failure — the DM error bubble showed zero
+          // diagnostic content even though the provider had a specific reason
+          // (report §4.10).
+          error_message: errorMessage ?? null,
+          input_tokens: result.usage.inputTokens,
+          output_tokens: result.usage.outputTokens,
+          cache_creation_input_tokens: result.usage.cacheCreationInputTokens,
+          cache_read_input_tokens: result.usage.cacheReadInputTokens,
+          total_cost_usd: result.totalCostUsd,
+        })
+        .where("id", "=", assistantMessageId)
+        .execute();
+      if (result.sessionId) {
+        await trx
+          .updateTable("conversations")
+          .set({ session_id: result.sessionId, session_provider: providerName })
+          .where("id", "=", input.conversationId)
+          .execute();
+      }
+      await emit({ companyId: input.companyId, type: "message.completed", subjectId: assistantMessageId, actor: { kind: "employee", employeeId: employee.id }, payload: { conversationId: input.conversationId, ok: result.success, usage: result.usage } });
+    });
+
+    // Mirrors the legacy/client behavior: the reaction is applied whenever the
+    // model emitted the suffix, even if the turn otherwise ended ungracefully.
+    if (reactMatch) {
+      await addReaction(ctx, userMessageId, reactMatch[1], employee.id);
+      reaction = { messageId: userMessageId, emoji: reactMatch[1] };
+    }
+  } catch (err) {
+    success = false;
+    errorMessage = err instanceof Error ? err.message : String(err);
+    await mutate(ctx, async (trx, emit) => {
+      await trx.updateTable("messages").set({ status: "error", error_message: errorMessage }).where("id", "=", assistantMessageId).execute();
+      await emit({ companyId: input.companyId, type: "message.errored", subjectId: assistantMessageId, actor: { kind: "system" }, payload: {} });
+    });
+  }
+
+  return { userMessageId, assistantMessageId, sessionId, success, errorMessage, reaction };
+}
+
+// ---- channel-send orchestration (full cutover: no client-side equivalent existed
+// to port from — this replicates useChannel.ts's sendToMembers() plus the legacy
+// sidecar's handleCheckRelevance/handleSendChannel entirely server-side) ----
+
+// Relevance gatekeeping is always a cheap, internal Claude call regardless of which
+// provider the employee actually chats with — ported from the legacy sidecar.
+const RELEVANCE_CHECK_MODEL = "claude-haiku-4-5-20251001";
+
+function extractJson(text: string): string {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+  return fenced ? fenced[1] : text;
+}
+
+interface ChannelControl {
+  respondsWithText: boolean;
+  replyToMessageId: string | null;
+  threadRootId: string | null;
+  reactions: { messageId: string; emoji: string }[];
+}
+
+function parseChannelControl(fullText: string): { control: ChannelControl; text: string } {
+  const fallback: ChannelControl = { respondsWithText: true, replyToMessageId: null, threadRootId: null, reactions: [] };
+  const match = fullText.match(/```control\s*([\s\S]*?)\s*```/);
+  if (!match) return { control: fallback, text: fullText.trim() };
+
+  // Strip the matched fence region regardless of whether the JSON inside it parses,
+  // so a parse failure doesn't leak the literal control block into the posted
+  // channel message (report §3.5, ported from the legacy sidecar's fix).
+  const text = fullText.slice((match.index ?? 0) + match[0].length).trim();
+  try {
+    const parsed = JSON.parse(match[1]);
+    const control: ChannelControl = {
+      respondsWithText: parsed.respondsWithText ?? true,
+      replyToMessageId: parsed.replyToMessageId ?? null,
+      threadRootId: parsed.threadRootId ?? null,
+      reactions: Array.isArray(parsed.reactions) ? parsed.reactions : [],
+    };
+    return { control, text };
+  } catch {
+    return { control: fallback, text };
+  }
+}
+
+function buildChannelSystemPrompt(
+  baseSystemPrompt: string,
+  openThreads: { id: string; preview: string }[],
+  reactionTargets: { id: string; author: string; preview: string }[],
+): string {
+  const threadsBlock = openThreads.length ? openThreads.map((t) => `- ${t.id}: ${t.preview}`).join("\n") : "(none open right now)";
+  const targetsBlock = reactionTargets.length ? reactionTargets.map((t) => `- ${t.id} (${t.author}): ${t.preview}`).join("\n") : "(none)";
+
+  return [
+    baseSystemPrompt,
+    [
+      "You are responding in a multi-person channel, not a 1:1 DM. Reply with EXACTLY one fenced control block first, then your message text (if any) after it:",
+      "```control",
+      '{"respondsWithText": true, "replyToMessageId": null, "threadRootId": null, "reactions": []}',
+      "```",
+      "Your message text goes here if respondsWithText is true.",
+      "",
+      "Rules:",
+      '- Set "respondsWithText" to false if you have nothing valuable to add and do not want to post a message (you can still react via "reactions" even when this is false).',
+      '- "replyToMessageId": the id of a specific message you are directly replying to, or null.',
+      '- "threadRootId": the id of an existing thread to reply within (see Open threads below), or null to post as a new top-level message.',
+      '- "reactions": a list of {"messageId": "...", "emoji": "..."} for reactions to add to specific recent messages, independent of whether you post text.',
+      "",
+      "Open threads:",
+      threadsBlock,
+      "",
+      "Recent messages you can reply to or react to:",
+      targetsBlock,
+    ].join("\n"),
+  ].join("\n\n---\n\n");
+}
+
+async function checkMemberRelevance(
+  provider: AgentProvider,
+  employeeContext: string,
+  channelName: string,
+  triggerMessage: string,
+): Promise<{ respond: boolean; reason: string }> {
+  const systemPrompt = [
+    `You are deciding whether ONE employee should reply to a message in the #${channelName} channel.`,
+    `Say YES (respond) if the message is relevant to this employee's role, asks for something they can help with, addresses them, or they can add genuine value. Say NO only if it is clearly outside their area or they would add nothing. For a plausibly-relevant employee, lean YES — in a channel, a helpful reply beats silence. (Direct @mentions are already handled and always reply.)`,
+    `Employee:\n${employeeContext}`,
+    `Respond with ONLY a JSON object, no other text: {"respond": true|false, "reason": "one short sentence"}`,
+  ].join("\n\n");
+
+  try {
+    let raw = "";
+    await drainTurn(
+      provider.runTurn({ model: RELEVANCE_CHECK_MODEL, effort: "low", systemPrompt, prompt: triggerMessage }),
+      (text) => {
+        raw += text;
+      },
+    );
+    try {
+      const parsed = JSON.parse(extractJson(raw));
+      return { respond: Boolean(parsed.respond), reason: String(parsed.reason ?? "") };
+    } catch {
+      return { respond: false, reason: `Could not parse relevance decision; defaulting to skip. Raw: ${raw.slice(0, 200)}` };
+    }
+  } catch (err) {
+    return { respond: false, reason: `Relevance check errored, defaulting to skip: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+export interface SendChannelMessageInput {
+  companyId: string;
+  conversationId: string;
+  text: string;
+  replyTo?: { messageId: string; threadRootId: string | null } | null;
+}
+
+export interface ChannelResponderOutcome {
+  employeeId: string;
+  respond: boolean;
+  posted: boolean;
+  error?: string;
+}
+
+export interface SendChannelMessageResult {
+  userMessageId: string;
+  responders: ChannelResponderOutcome[];
+}
+
+/**
+ * The channel turn loop: relevance-gates every member (an @mention always
+ * bypasses the gate), then runs each responder's turn in parallel, parsing its
+ * control-block for whether to post text, which thread/message to reply to,
+ * and which reactions to add. `relevanceProviderOverride`/`responderProviderOverride`
+ * are for tests.
+ */
+export async function sendChannelMessage(
+  ctx: RuntimeContext,
+  input: SendChannelMessageInput,
+  relevanceProviderOverride?: AgentProvider,
+  responderProviderOverride?: AgentProvider,
+): Promise<SendChannelMessageResult> {
+  await assertConversationInCompany(ctx, input.companyId, input.conversationId);
+
+  const conv = await ctx.db.selectFrom("conversations").where("id", "=", input.conversationId).select(["name"]).executeTakeFirstOrThrow();
+  const company = await ctx.db.selectFrom("companies").where("id", "=", input.companyId).select(["profile", "system_prompt"]).executeTakeFirstOrThrow();
+  const { userFullName } = await getUserProfile(ctx);
+  const members = await listChannelMembers(ctx, input.conversationId);
+
+  // 1. persist the user message (optionally inside an existing thread)
+  const userMessageId = randomUUID();
+  const userThreadRootId = input.replyTo ? input.replyTo.threadRootId ?? input.replyTo.messageId : null;
   await mutate(ctx, async (trx, emit) => {
     await trx
-      .updateTable("messages")
-      .set({
-        content: full,
-        status: result.success ? "complete" : "error",
-        // Previously left null on failure — the DM error bubble showed zero
-        // diagnostic content even though the provider had a specific reason
-        // (report §4.10).
-        error_message: result.success ? null : (result.errorMessage ?? "The assistant did not complete this response."),
-        input_tokens: result.usage.inputTokens,
-        output_tokens: result.usage.outputTokens,
-        cache_creation_input_tokens: result.usage.cacheCreationInputTokens,
-        cache_read_input_tokens: result.usage.cacheReadInputTokens,
-        total_cost_usd: result.totalCostUsd,
+      .insertInto("messages")
+      .values({
+        id: userMessageId,
+        conversation_id: input.conversationId,
+        role: "user",
+        content: input.text,
+        status: "complete",
+        thread_root_id: userThreadRootId,
+        reply_to_message_id: input.replyTo?.messageId ?? null,
       })
-      .where("id", "=", assistantMessageId)
       .execute();
-    if (result.sessionId) {
-      await trx
-        .updateTable("conversations")
-        .set({ session_id: result.sessionId, session_provider: providerName })
-        .where("id", "=", input.conversationId)
-        .execute();
-    }
-    await emit({ companyId: input.companyId, type: "message.completed", subjectId: assistantMessageId, actor: { kind: "employee", employeeId: employee.id }, payload: { conversationId: input.conversationId, ok: result.success, usage: result.usage } });
+    await emit({ companyId: input.companyId, type: "message.created", subjectId: userMessageId, actor: { kind: "user" }, payload: { role: "user", conversationId: input.conversationId } });
   });
 
-  return { userMessageId, assistantMessageId, sessionId: result.sessionId };
+  if (members.length === 0) return { userMessageId, responders: [] };
+
+  // 2. gather channel context: open threads, recent messages (for reactions),
+  // and every member's display name (needed for identity blocks + @mentions).
+  const openThreadRows = await openThreadRoots(ctx, input.conversationId, 10);
+  const openThreads = openThreadRows.map((r) => ({ id: r.id, preview: r.content.slice(0, 60) }));
+
+  const recentRows = await recentMessages(ctx, input.conversationId, 15);
+  const authorNameCache = new Map<string, string>();
+  const reactionTargets: { id: string; author: string; preview: string }[] = [];
+  for (const r of recentRows) {
+    let author = userFullName;
+    if (r.author_employee_id) {
+      const cached = authorNameCache.get(r.author_employee_id);
+      author = cached ?? (await employeeDisplayName(ctx, r.author_employee_id)) ?? "Someone";
+      authorNameCache.set(r.author_employee_id, author);
+    }
+    reactionTargets.push({ id: r.id, author, preview: r.content.slice(0, 60) });
+  }
+
+  const memberNames = new Map<string, string>();
+  for (const m of members) {
+    memberNames.set(m.id, (await employeeDisplayName(ctx, m.id)) ?? "Employee");
+  }
+
+  // 3. relevance gate: an @mention always responds and bypasses the gate; with
+  // no mentions, every member goes through the cheap Claude relevance check.
+  const memberTargets: MentionTarget[] = members
+    .map((m) => ({ type: "employee" as const, conversationId: m.conversation_id, label: memberNames.get(m.id) ?? "" }))
+    .filter((t) => t.label);
+  const mentionedConvIds = new Set(findMentions(input.text, memberTargets).map((x) => x.target.conversationId));
+  const hasMentions = mentionedConvIds.size > 0;
+  const relevanceProvider = relevanceProviderOverride ?? getProvider("claude");
+
+  const relevanceResults = await Promise.all(
+    members.map(async (member) => {
+      if (hasMentions) {
+        return mentionedConvIds.has(member.conversation_id)
+          ? { member, respond: true, reason: "Directly @mentioned." }
+          : { member, respond: false, reason: "Not mentioned in a directed message." };
+      }
+      const managerName = await resolveManagerName(ctx, member.manager_employee_id, userFullName);
+      const identityBlock = buildIdentityBlock(memberNames.get(member.id) ?? "Employee", member, managerName);
+      const responsibilityRows = await listResponsibilities(ctx, member.id);
+      const employeeContext = `${identityBlock}\nMission: ${member.mission}\nResponsibilities: ${responsibilityRows.map((r) => r.text).join("; ") || "(none listed)"}`;
+      const { respond, reason } = await checkMemberRelevance(relevanceProvider, employeeContext, conv.name, input.text);
+      return { member, respond, reason };
+    }),
+  );
+
+  await Promise.all(
+    relevanceResults.map(({ member, respond, reason }) => insertRelevanceCheck(ctx, userMessageId, member.id, respond ? "respond" : "skip", reason)),
+  );
+
+  const relevanceMeta = relevanceResults.map((r) => ({
+    employeeName: memberNames.get(r.member.id) ?? "Employee",
+    decision: r.respond ? ("respond" as const) : ("skip" as const),
+    reason: r.reason,
+  }));
+
+  const responders = relevanceResults.filter((r) => r.respond).map((r) => r.member);
+
+  // 4. run every responder's turn in parallel.
+  const outcomes = await Promise.all(
+    responders.map(async (member): Promise<ChannelResponderOutcome> => {
+      const providerName = modelProvider(member.default_model);
+      const session = await getAgentSession(ctx, input.conversationId, member.id);
+      const storedProvider = session?.session_provider ?? "claude";
+      const resumeSessionId = storedProvider === providerName ? session?.session_id ?? null : null;
+
+      const managerName = await resolveManagerName(ctx, member.manager_employee_id, userFullName);
+      const displayName = memberNames.get(member.id) ?? "Employee";
+      const identityBlock = buildIdentityBlock(displayName, member, managerName);
+      const responsibilityRows = await listResponsibilities(ctx, member.id);
+      const responsibilities = responsibilityRows.map((r) => r.text);
+      const baseSystemPrompt = composeSystemPrompt(company.profile, company.system_prompt, identityBlock, member, responsibilities);
+      const otherMemberNames = members
+        .filter((m) => m.id !== member.id)
+        .map((m) => memberNames.get(m.id))
+        .filter((n): n is string => !!n);
+      const mentionScope = otherMemberNames.length
+        ? `You may only @mention people who are members of this channel: ${otherMemberNames.join(", ")}. Do not @mention anyone else — they aren't part of this conversation and won't see it.`
+        : `There is nobody else in this channel to @mention right now.`;
+      const systemPrompt = buildChannelSystemPrompt(`${baseSystemPrompt}\n\n---\n\n${mentionScope}`, openThreads, reactionTargets);
+
+      const rawNotices = await consumeReactionNotices(ctx, member.id, userFullName);
+      const { notices, block: noticesBlock } = formatReactionNoticesForPrompt(rawNotices);
+      const promptWithNotices = noticesBlock ? `${noticesBlock}\n\n${input.text}` : input.text;
+
+      try {
+        const provider = responderProviderOverride ?? getProvider(providerName);
+        let fullText = "";
+        const result = await drainTurn(
+          provider.runTurn({ model: member.default_model, effort: member.default_effort as Effort, systemPrompt, prompt: promptWithNotices, resumeSessionId }),
+          (text) => {
+            fullText += text;
+          },
+        );
+
+        const { control, text } = parseChannelControl(fullText);
+
+        if (result.sessionId) {
+          await upsertAgentSession(ctx, input.conversationId, member.id, result.sessionId, providerName);
+        }
+        for (const r of control.reactions) {
+          await addReaction(ctx, r.messageId, r.emoji, member.id);
+        }
+
+        let posted = false;
+        if (control.respondsWithText && text.trim()) {
+          const threadRootId =
+            control.threadRootId ??
+            (control.replyToMessageId ? openThreadRows.find((t) => t.id === control.replyToMessageId)?.id ?? control.replyToMessageId : null);
+
+          const debugPayload = JSON.stringify({
+            model: member.default_model,
+            effort: member.default_effort,
+            companySystemPrompt: company.system_prompt,
+            companyProfile: company.profile,
+            identityBlock,
+            mission: member.mission,
+            preamble: member.preamble,
+            responsibilities,
+            additionalDetails: member.additional_details,
+            prompt: promptWithNotices,
+            reactionNotices: notices,
+            resumeSessionId,
+            sentAt: new Date().toISOString(),
+            channel: { relevanceChecks: relevanceMeta, replyToMessageId: control.replyToMessageId, threadRootId, reactionsApplied: control.reactions },
+          });
+
+          await insertChannelAssistantMessage(ctx, {
+            id: randomUUID(),
+            conversationId: input.conversationId,
+            content: text.trim(),
+            model: member.default_model,
+            effort: member.default_effort,
+            debugPayload,
+            threadRootId,
+            replyToMessageId: control.replyToMessageId,
+            authorEmployeeId: member.id,
+            usage: result.usage,
+            totalCostUsd: result.totalCostUsd,
+          });
+          posted = true;
+        }
+
+        return { employeeId: member.id, respond: true, posted };
+      } catch (err) {
+        // Covers both the turn itself failing and any post-processing step above
+        // (session upsert, reactions, message insert) throwing — mirrors the
+        // client's catch-and-post-error-message behavior (report §1.2).
+        const message = err instanceof Error ? err.message : String(err);
+        await insertErrorMessage(ctx, { id: randomUUID(), conversationId: input.conversationId, errorMessage: message, authorEmployeeId: member.id }).catch(() => {});
+        return { employeeId: member.id, respond: true, posted: false, error: message };
+      }
+    }),
+  );
+
+  const skipped: ChannelResponderOutcome[] = relevanceResults.filter((r) => !r.respond).map((r) => ({ employeeId: r.member.id, respond: false, posted: false }));
+
+  return { userMessageId, responders: [...outcomes, ...skipped] };
 }

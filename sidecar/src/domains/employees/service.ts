@@ -175,3 +175,30 @@ export async function listChannelMembers(ctx: RuntimeContext, conversationId: st
     .selectAll("e")
     .execute();
 }
+
+/**
+ * An employee's "name" isn't its own column — it's the name of the 1:1 DM
+ * conversation created alongside it (see createEmployee above). Ported from the
+ * client's `employeesById[id].name` lookup now that prompt composition
+ * (identity blocks, manager resolution, @mention scoping) runs server-side.
+ */
+export async function employeeDisplayName(ctx: RuntimeContext, employeeId: string): Promise<string | null> {
+  const row = await ctx.db
+    .selectFrom("employees as e")
+    .innerJoin("conversations as c", "c.id", "e.conversation_id")
+    .where("e.id", "=", employeeId)
+    .select("c.name")
+    .executeTakeFirst();
+  return row?.name ?? null;
+}
+
+/** Server-side fork of src/lib/promptBuilder.ts's resolveManagerName. */
+export async function resolveManagerName(
+  ctx: RuntimeContext,
+  managerEmployeeId: string | null,
+  userFullName: string,
+): Promise<string> {
+  if (!managerEmployeeId) return userFullName || "the founder";
+  const name = await employeeDisplayName(ctx, managerEmployeeId);
+  return name ?? (userFullName || "the founder");
+}

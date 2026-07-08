@@ -184,6 +184,156 @@ test("chat turn loop (runtime): streams, persists messages, resumes session", as
   await ctx.db.destroy();
 });
 
+test("sendMessage (DM, full cutover parity): reply-threading persists thread_root_id, and a trailing [[react:emoji]] is stripped from the reply + persisted as a reaction on the user's message", async () => {
+  const { sendMessage } = await import("../domains/conversations/service");
+  const ctx = freshCtx();
+  const { id: companyId } = await createCompany(ctx, { name: "A" }, { kind: "user" });
+  const cos = await ctx.db
+    .selectFrom("employees")
+    .where("company_id", "=", companyId)
+    .select(["id", "conversation_id"])
+    .executeTakeFirstOrThrow();
+
+  const provider = {
+    async *runTurn() {
+      yield "Sounds good!\n[[react:👍]]";
+      return {
+        sessionId: "sess-thread",
+        success: true,
+        usage: { inputTokens: 1, outputTokens: 1, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+        totalCostUsd: 0,
+      };
+    },
+  };
+  const sink = { delta: () => {} };
+
+  const root = await sendMessage(ctx, { companyId, conversationId: cos.conversation_id, text: "root" }, sink, provider as never);
+  const reply = await sendMessage(
+    ctx,
+    { companyId, conversationId: cos.conversation_id, text: "thanks", replyTo: { messageId: root.userMessageId, threadRootId: null } },
+    sink,
+    provider as never,
+  );
+
+  assert.equal(reply.success, true);
+  assert.deepEqual(reply.reaction, { messageId: reply.userMessageId, emoji: "👍" });
+
+  const userMsg = await ctx.db.selectFrom("messages").where("id", "=", reply.userMessageId).selectAll().executeTakeFirstOrThrow();
+  assert.equal(userMsg.thread_root_id, root.userMessageId);
+  assert.equal(userMsg.reply_to_message_id, root.userMessageId);
+
+  const assistantMsg = await ctx.db.selectFrom("messages").where("id", "=", reply.assistantMessageId).selectAll().executeTakeFirstOrThrow();
+  assert.equal(assistantMsg.content, "Sounds good!");
+  assert.equal(assistantMsg.thread_root_id, root.userMessageId);
+  assert.equal(assistantMsg.reply_to_message_id, null);
+
+  const reactions = await ctx.db.selectFrom("reactions").where("message_id", "=", reply.userMessageId).selectAll().execute();
+  assert.equal(reactions.length, 1);
+  assert.equal(reactions[0].emoji, "👍");
+  assert.equal(reactions[0].reactor, cos.id);
+
+  await ctx.db.destroy();
+});
+
+test("sendMessage (DM): a provider throwing mid-turn is caught and persisted as an errored message instead of rejecting the command", async () => {
+  const { sendMessage } = await import("../domains/conversations/service");
+  const ctx = freshCtx();
+  const { id: companyId } = await createCompany(ctx, { name: "A" }, { kind: "user" });
+  const cos = await ctx.db
+    .selectFrom("employees")
+    .where("company_id", "=", companyId)
+    .select(["id", "conversation_id"])
+    .executeTakeFirstOrThrow();
+
+  const provider = {
+    // eslint-disable-next-line require-yield -- intentionally throws before ever yielding
+    async *runTurn() {
+      throw new Error("subprocess crashed");
+    },
+  };
+  const sink = { delta: () => {} };
+
+  const res = await sendMessage(ctx, { companyId, conversationId: cos.conversation_id, text: "hi" }, sink, provider as never);
+  assert.equal(res.success, false);
+  assert.match(res.errorMessage ?? "", /subprocess crashed/);
+
+  const assistantMsg = await ctx.db.selectFrom("messages").where("id", "=", res.assistantMessageId).selectAll().executeTakeFirstOrThrow();
+  assert.equal(assistantMsg.status, "error");
+  assert.match(assistantMsg.error_message ?? "", /subprocess crashed/);
+
+  await ctx.db.destroy();
+});
+
+test("sendChannelMessage (full cutover — new server-side orchestration, no client equivalent existed): @mention bypasses relevance gate and posts a control-block-parsed reply; a non-mentioned member is relevance-gated out", async () => {
+  const { sendChannelMessage } = await import("../domains/conversations/service");
+  const { createEmployee, toggleMembership } = await import("../domains/employees/service");
+  const ctx = freshCtx();
+  const { id: companyId, generalConversationId } = await createCompany(ctx, { name: "A" }, { kind: "user" });
+
+  const alice = await createEmployee(ctx, { companyId, name: "Alice" });
+  const bob = await createEmployee(ctx, { companyId, name: "Bob" });
+  await toggleMembership(ctx, generalConversationId, alice.employeeId);
+  await toggleMembership(ctx, generalConversationId, bob.employeeId);
+
+  const relevanceCalls: string[] = [];
+  const relevanceProvider = {
+    async *runTurn(opts: { prompt: string }) {
+      relevanceCalls.push(opts.prompt);
+      yield '{"respond": false, "reason": "not relevant"}';
+      return { sessionId: null, success: true, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }, totalCostUsd: 0 };
+    },
+  };
+  const responderProvider = {
+    async *runTurn() {
+      yield '```control\n{"respondsWithText": true, "replyToMessageId": null, "threadRootId": null, "reactions": []}\n```\nOn it!';
+      return {
+        sessionId: "sess-chan",
+        success: true,
+        usage: { inputTokens: 2, outputTokens: 2, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+        totalCostUsd: 0,
+      };
+    },
+  };
+
+  const result = await sendChannelMessage(
+    ctx,
+    { companyId, conversationId: generalConversationId, text: "@Alice can you take a look?" },
+    relevanceProvider as never,
+    responderProvider as never,
+  );
+
+  // Once ANY member is @mentioned, every member's decision is made locally —
+  // mentioned members always respond, everyone else is skipped — with no
+  // relevance-check model call for anyone (mirrors useChannel.ts's sendToMembers).
+  assert.equal(relevanceCalls.length, 0);
+
+  const aliceOutcome = result.responders.find((r) => r.employeeId === alice.employeeId);
+  const bobOutcome = result.responders.find((r) => r.employeeId === bob.employeeId);
+  assert.equal(aliceOutcome?.respond, true);
+  assert.equal(aliceOutcome?.posted, true);
+  assert.equal(bobOutcome?.respond, false);
+  assert.equal(bobOutcome?.posted, false);
+
+  const posted = await ctx.db
+    .selectFrom("messages")
+    .where("conversation_id", "=", generalConversationId)
+    .where("author_employee_id", "=", alice.employeeId)
+    .selectAll()
+    .execute();
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].content, "On it!");
+
+  // #general already has the seeded Chief of Staff as a third member — every
+  // member (including it) gets a relevance_checks row, mentioned or not.
+  const relevanceRows = await ctx.db.selectFrom("relevance_checks").where("message_id", "=", result.userMessageId).selectAll().execute();
+  assert.equal(relevanceRows.length, 3);
+
+  const session = await ctx.db.selectFrom("agent_sessions").where("conversation_id", "=", generalConversationId).where("employee_id", "=", alice.employeeId).selectAll().executeTakeFirst();
+  assert.equal(session?.session_id, "sess-chan");
+
+  await ctx.db.destroy();
+});
+
 test("PROOF-OF-LIFE: github connector commit through gate + approval + vault", async () => {
   const { execFileSync } = await import("node:child_process");
   const ctx = freshCtx();

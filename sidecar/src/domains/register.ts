@@ -18,6 +18,7 @@ import {
   listMessages,
   renameConversation,
   sendMessage,
+  sendChannelMessage,
   listReactions,
   toggleReaction,
   listReplyCounts,
@@ -41,6 +42,7 @@ import {
   consumeReactionNotices,
   createChannel,
 } from "./conversations/service";
+import { countTokens } from "./tokenCount";
 import { generateOnboarding, applyOnboarding, type SuggestedRole } from "./onboarding/service";
 import type { Effort } from "../providers";
 import {
@@ -309,7 +311,14 @@ register("command:reactionNotices.consume", async (ctx, inbound) => {
 register("command:message.send", async (ctx, inbound, sink) => {
   const cmd = inbound as CommandEnvelope<
     "message.send",
-    { conversationId: string; text: string; model?: string; effort?: string; provider?: string | null }
+    {
+      conversationId: string;
+      text: string;
+      model?: string;
+      effort?: string;
+      provider?: string | null;
+      replyTo?: { messageId: string; threadRootId: string | null } | null;
+    }
   >;
   return sendMessage(
     ctx,
@@ -320,9 +329,28 @@ register("command:message.send", async (ctx, inbound, sink) => {
       model: cmd.payload.model,
       effort: validateEffort(cmd.payload.effort),
       provider: cmd.payload.provider ?? null,
+      replyTo: cmd.payload.replyTo ?? null,
     },
     sink,
   );
+});
+
+register("command:message.sendChannel", async (ctx, inbound) => {
+  const cmd = inbound as CommandEnvelope<
+    "message.sendChannel",
+    { conversationId: string; text: string; replyTo?: { messageId: string; threadRootId: string | null } | null }
+  >;
+  return sendChannelMessage(ctx, {
+    companyId: requireCompany(inbound),
+    conversationId: cmd.payload.conversationId,
+    text: cmd.payload.text,
+    replyTo: cmd.payload.replyTo ?? null,
+  });
+});
+
+register("query:tokenCount.count", async (_ctx, inbound) => {
+  const { provider, model, systemPrompt } = p<{ provider?: string | null; model: string; systemPrompt: string }>(inbound);
+  return countTokens({ provider, model, systemPrompt });
 });
 
 register("command:tool.invoke", async (ctx, inbound) => {
