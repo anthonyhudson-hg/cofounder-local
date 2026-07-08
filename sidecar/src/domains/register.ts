@@ -41,7 +41,8 @@ import {
   consumeReactionNotices,
   createChannel,
 } from "./conversations/service";
-import { generateOnboarding, applyOnboarding } from "./onboarding/service";
+import { generateOnboarding, applyOnboarding, type SuggestedRole } from "./onboarding/service";
+import type { Effort } from "../providers";
 import {
   listEmployees,
   getEmployeeByConversation,
@@ -85,6 +86,21 @@ register("command:company.create", async (ctx, inbound) => {
 function requireCompany(inbound: { companyId: string | null }): string {
   if (!inbound.companyId) throw new Error("this operation requires a company scope");
   return inbound.companyId;
+}
+
+const VALID_EFFORTS: ReadonlySet<string> = new Set<Effort>(["low", "medium", "high", "xhigh", "max"]);
+
+/**
+ * Validates a wire-supplied effort string against the real Effort union instead of
+ * an `as never` cast, which made any string from the wire — including a garbage or
+ * protocol-version-mismatched value — silently type-check as valid and only surface
+ * as a runtime error deep inside provider-specific effort-mapping code instead of a
+ * clean validation error at the dispatch boundary (report §1.4).
+ */
+function validateEffort(effort: string | undefined): Effort | undefined {
+  if (effort === undefined) return undefined;
+  if (!VALID_EFFORTS.has(effort)) throw new Error(`invalid effort: ${effort}`);
+  return effort as Effort;
 }
 
 register("query:companies.list", async (ctx) => listCompanies(ctx));
@@ -188,7 +204,7 @@ register("command:onboarding.generate", async (ctx, inbound) => {
   return generateOnboarding(ctx, p(inbound));
 });
 register("command:onboarding.apply", async (ctx, inbound) => {
-  return applyOnboarding(ctx, { companyId: requireCompany(inbound), ...p<{ companyName: string; profile: string; systemPrompt: string; roles: never[]; channels: string[] }>(inbound) });
+  return applyOnboarding(ctx, { companyId: requireCompany(inbound), ...p<{ companyName: string; profile: string; systemPrompt: string; roles: SuggestedRole[]; channels: string[] }>(inbound) });
 });
 register("command:responsibility.add", async (ctx, inbound) => {
   const { employeeId, text } = p<{ employeeId: string; text: string }>(inbound);
@@ -302,7 +318,7 @@ register("command:message.send", async (ctx, inbound, sink) => {
       conversationId: cmd.payload.conversationId,
       text: cmd.payload.text,
       model: cmd.payload.model,
-      effort: cmd.payload.effort as never,
+      effort: validateEffort(cmd.payload.effort),
       provider: cmd.payload.provider ?? null,
     },
     sink,
@@ -329,6 +345,12 @@ register("command:approval.resolve", async (ctx, inbound) => {
     "approval.resolve",
     { approvalId: string; decision: "approved" | "denied" }
   >;
+  // The type above is compile-time only; validate the actual wire value before it
+  // reaches a `status` column SQLite won't itself constrain to these two values
+  // (report §4.11).
+  if (cmd.payload.decision !== "approved" && cmd.payload.decision !== "denied") {
+    throw new Error(`invalid approval decision: ${cmd.payload.decision}`);
+  }
   const resolved = await resolveApproval(ctx, cmd.payload.approvalId, cmd.payload.decision, "user");
   if (cmd.payload.decision !== "approved" || !resolved.employeeId) {
     return { executed: false };

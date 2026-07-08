@@ -63,7 +63,10 @@ These patterns repeat across many files. Fix the pattern once instead of patchin
 
 **Fix:** every reload closure needs to check staleness before committing state — either an incrementing generation counter compared at commit time, or an `AbortController` per request, keyed on the id that triggered the fetch.
 
-### 1.4 — No runtime validation at any IPC/command dispatch boundary — MEDIUM
+### 1.4 — No runtime validation at any IPC/command dispatch boundary — MEDIUM — ✅ DONE
+
+**Fix applied:** `dispatch.ts` gained `validateInbound()`, checking `kind`/`id`/`type`/`companyId` shape before dispatch ever sees the message; `runtime/index.ts` calls it right after `JSON.parse` and, on failure, extracts whatever `id` it can (`extractId`) so an id-bearing malformed message still gets a correlatable error instead of the client hanging forever. `register.ts`'s `roles: never[]` was replaced with the real `SuggestedRole[]` type; `effort: cmd.payload.effort as never` was replaced with a `validateEffort()` check against the real `Effort` union, throwing a clean validation error at the dispatch boundary instead of failing deep inside provider effort-mapping code. `approval.resolve`'s `decision` is now validated against `"approved"|"denied"` before use, closing the §4.11 gap in the same pass.
+
 **Where:** `sidecar/src/domains/register.ts` (every one of ~40 handlers does `inbound as CommandEnvelope<...>` or uses the `p<T>()` helper — both are compile-time-only casts), `sidecar/src/runtime/dispatch.ts` (26-34, blindly interpolates `${inbound.kind}:${inbound.type}`), `sidecar/src/tools/registry.ts`/`types.ts` (tool `input: unknown` never schema-checked before `tool.run()`), `src-tauri/src/sidecar.rs`'s `send_to_runtime` (459-472, forwards arbitrary `serde_json::Value` with zero shape check).
 
 **Failure scenario:** two concrete, already-confirmed instances of this exact gap causing real bugs:
@@ -203,7 +206,10 @@ If `query()`'s generator completes without ever yielding a `type:"result"` messa
 
 **Fix:** track whether a `result` message was actually observed; throw explicitly if the stream ends without one.
 
-### 3.3 — Malformed inbound runtime message drops its `id`, hanging the client forever — MEDIUM (compounds §1.1)
+### 3.3 — Malformed inbound runtime message drops its `id`, hanging the client forever — MEDIUM (compounds §1.1) — ✅ DONE
+
+**Fix applied:** see §1.4 above — `validateInbound`/`extractId` in `dispatch.ts`/`runtime/index.ts` close this exact gap.
+
 **Files:** `sidecar/src/runtime/index.ts:41-64`, `sidecar/src/runtime/dispatch.ts:26-34`
 
 `RuntimeInbound` is compile-time-only; nothing validates the parsed JSON's shape. If `inbound.id` is missing or non-string, `dispatch` throws `"no handler for undefined:undefined"`, and the catch block constructs `{kind:"result", id: undefined, ...}` — but `JSON.stringify` **omits keys with `undefined` values**, so the client receives a result envelope with *no `id` field at all* and can never correlate it back to its pending request. Unlike the JSON.parse-failure path (which correctly hardcodes `id: "unknown"`), this path just hangs the caller.
@@ -363,7 +369,7 @@ When `result.success` is `false` (rate limit, max-turns, refusal from the SDK), 
 - **`companies/service.ts` LOW-MEDIUM** (122-133, 187-212): deleting the active company doesn't itself update `active_company_id` — it relies on the frontend making a *second*, separate IPC call after `removeCompany` returns. If the app dies between the two calls, `settings.active_company_id` points at a dead row forever, and nothing that reads it checks existence. Fix: update the fallback id inside the same transaction as the delete.
 - **`companies/service.ts` LOW**: `updateCompany` discards the update result — a stale/unknown `companyId` silently no-ops instead of erroring. Same pattern in `onboarding/service.ts:applyOnboarding` (133-137).
 - **`employees/service.ts` LOW** (54-73): `createEmployee` doesn't trim/require `input.name`, unlike `createChannel`/`createGroup` elsewhere in the same file — a whitespace-only name silently creates a blank-labeled employee.
-- **`approvals/service.ts` LOW** (40-52): `resolveApproval`'s `decision` param is only compile-time-restricted to `"approved"|"denied"`; the one caller does an unchecked `as` cast on IPC input (§1.4), so a malformed payload could reach the `status` column with an arbitrary string SQLite won't reject.
+- **`approvals/service.ts` LOW** (40-52): `resolveApproval`'s `decision` param is only compile-time-restricted to `"approved"|"denied"`; the one caller does an unchecked `as` cast on IPC input (§1.4), so a malformed payload could reach the `status` column with an arbitrary string SQLite won't reject. — ✅ DONE: `register.ts`'s `command:approval.resolve` handler now validates `decision` before calling `resolveApproval`.
 
 ---
 

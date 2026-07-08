@@ -23,6 +23,28 @@ export function register(key: string, handler: Handler): void {
   handlers.set(key, handler);
 }
 
+/**
+ * Validates the minimal shape of an inbound message before dispatch touches it. This
+ * is a JSON-over-stdio boundary crossing two languages (TS type erased on this side,
+ * Rust's serde_json::Value on the other) — compile-time typing provides no actual
+ * protection here. A malformed message (protocol-version skew, a renderer bug) used
+ * to reach `dispatch` with a missing/non-string `id`, producing a result envelope
+ * whose `id` key `JSON.stringify` silently omits — the client could then never
+ * correlate the response and just hung forever (report §1.4/§3.3).
+ */
+export function validateInbound(value: unknown): value is RuntimeInbound {
+  if (!value || typeof value !== "object") return false;
+  const v = value as Record<string, unknown>;
+  return (
+    (v.kind === "command" || v.kind === "query") &&
+    typeof v.id === "string" &&
+    v.id.length > 0 &&
+    typeof v.type === "string" &&
+    v.type.length > 0 &&
+    (v.companyId === null || typeof v.companyId === "string")
+  );
+}
+
 export async function dispatch(
   ctx: RuntimeContext,
   inbound: RuntimeInbound,
