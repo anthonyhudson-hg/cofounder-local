@@ -115,7 +115,10 @@ export async function updateCompany(
 ): Promise<void> {
   if (!COMPANY_FIELDS.has(field)) throw new Error(`invalid company field: ${field}`);
   await mutate(ctx, async (trx, emit) => {
-    await trx.updateTable("companies").set({ [field]: value } as never).where("id", "=", companyId).execute();
+    // A stale/unknown companyId previously no-op'd silently instead of surfacing an
+    // error (report §4.11).
+    const result = await trx.updateTable("companies").set({ [field]: value } as never).where("id", "=", companyId).executeTakeFirst();
+    if (!result.numUpdatedRows) throw new Error(`company ${companyId} not found`);
     await emit({ companyId, type: "company.updated", subjectId: companyId, actor: { kind: "user" }, payload: { field } });
   });
 }
@@ -183,6 +186,7 @@ export async function cloneCompany(ctx: RuntimeContext, sourceId: string, newNam
 export async function removeCompany(ctx: RuntimeContext, companyId: string): Promise<{ fallbackId: string }> {
   const others = await ctx.db.selectFrom("companies").where("id", "!=", companyId).select("id").orderBy("position").orderBy("created_at").execute();
   if (others.length === 0) throw new Error("Cannot delete the last remaining company");
+  const fallbackId = others[0].id;
 
   await mutate(ctx, async (trx, emit) => {
     const convIds = (await trx.selectFrom("conversations").where("company_id", "=", companyId).select("id").execute()).map((r) => r.id);
@@ -197,12 +201,40 @@ export async function removeCompany(ctx: RuntimeContext, companyId: string): Pro
       await trx.deleteFrom("channel_memberships").where("conversation_id", "in", convIds).execute();
       await trx.deleteFrom("messages").where("conversation_id", "in", convIds).execute();
     }
-    if (empIds.length) await trx.deleteFrom("employee_responsibilities").where("employee_id", "in", empIds).execute();
+    // Previously stopped here — secrets (including a deleted company's GitHub PAT,
+    // which then sat encrypted-at-rest indefinitely with nothing left to ever
+    // reference or clean it up), capability grants, and per-employee agent
+    // profiles/memory were never purged, becoming permanently orphaned rows
+    // referencing a company/employees that no longer exist (report §4.5).
+    await trx.deleteFrom("secrets").where("company_id", "=", companyId).execute();
+    await trx.deleteFrom("capability_grants").where("company_id", "=", companyId).execute();
+    await trx.deleteFrom("agent_memory").where("company_id", "=", companyId).execute();
+    if (empIds.length) {
+      await trx.deleteFrom("agent_profiles").where("employee_id", "in", empIds).execute();
+      await trx.deleteFrom("employee_responsibilities").where("employee_id", "in", empIds).execute();
+    }
     await trx.deleteFrom("employees").where("company_id", "=", companyId).execute();
     await trx.deleteFrom("conversations").where("company_id", "=", companyId).execute();
     await trx.deleteFrom("departments").where("company_id", "=", companyId).execute();
     await trx.deleteFrom("companies").where("id", "=", companyId).execute();
+
+    // Update active_company_id to the fallback INSIDE this same transaction whenever
+    // the company being removed is currently active, instead of depending on the
+    // frontend making a second, separate IPC call that might never land (app crash
+    // between the two calls would otherwise leave active_company_id pointing at a
+    // dead row forever, since nothing that reads it checks existence) (report §4.11).
+    // Uses `trx` directly (not the shared getSetting/setSetting helpers, which read
+    // via ctx.db) so this stays atomic with the rest of the delete.
+    const activeRow = await trx.selectFrom("settings").where("key", "=", "active_company_id").select("value").executeTakeFirst();
+    if (activeRow?.value === companyId) {
+      await trx
+        .insertInto("settings")
+        .values({ key: "active_company_id", value: fallbackId })
+        .onConflict((oc) => oc.column("key").doUpdateSet({ value: fallbackId }))
+        .execute();
+    }
+
     await emit({ companyId, type: "company.deleted", subjectId: companyId, actor: { kind: "user" }, payload: {} });
   });
-  return { fallbackId: others[0].id };
+  return { fallbackId };
 }

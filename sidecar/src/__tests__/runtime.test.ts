@@ -9,6 +9,7 @@ import "../domains/register";
 import { createRuntimeContext, type RuntimeContext } from "../runtime/context";
 import { openSqlite } from "../db/index";
 import { runMigrations } from "../db/migrator";
+import { BASELINE_SQL } from "../db/migrations";
 import { createCompany } from "../domains/companies/service";
 import { grantCapability } from "../tools/capability";
 import { invokeTool } from "../tools/registry";
@@ -30,11 +31,25 @@ test("migrator: fresh DB applies all migrations; existing DB baselines", () => {
   assert.equal(r1.baselined.length, 0);
   fresh.close();
 
+  // A genuine legacy Rust-migrated DB has the FULL baseline schema already, not just
+  // a bare `companies` table — the migrator now verifies this before adopting it
+  // (report §4.7), so the fixture here has to be realistic.
   const existing = openSqlite(path.join(os.tmpdir(), `cf-mig-${randomUUID()}.db`));
-  existing.exec("CREATE TABLE companies (id TEXT PRIMARY KEY, name TEXT NOT NULL)");
+  existing.exec(BASELINE_SQL);
   const r2 = runMigrations(existing);
   assert.ok(r2.baselined.includes("0001_baseline"), "existing schema baselined, not re-run");
   existing.close();
+});
+
+test("migrator: refuses to adopt a database whose schema doesn't actually match the baseline (report §4.7)", () => {
+  // A bare `companies` table used to be enough to fool the old "does companies
+  // exist" check into silently recording a clean baseline for a schema actually
+  // missing 15+ tables and several columns — undetected until a later "no such
+  // table/column" error at query time.
+  const incomplete = openSqlite(path.join(os.tmpdir(), `cf-mig-incomplete-${randomUUID()}.db`));
+  incomplete.exec("CREATE TABLE companies (id TEXT PRIMARY KEY, name TEXT NOT NULL)");
+  assert.throws(() => runMigrations(incomplete), /doesn't match what the runtime expects/);
+  incomplete.close();
 });
 
 test("LEAKAGE INVARIANT: scoped repos + secrets never cross companies", async () => {

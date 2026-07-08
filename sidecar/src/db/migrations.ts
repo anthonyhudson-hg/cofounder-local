@@ -15,7 +15,10 @@ export interface Migration {
   sql: string;
 }
 
-const BASELINE_SQL = `
+// Exported so the migrator can verify an adopted (pre-existing, Rust-migrated)
+// database's schema actually matches this baseline before recording it as applied
+// without running it (report §4.7) — see verifyBaselineSchema in migrator.ts.
+export const BASELINE_SQL = `
 CREATE TABLE companies (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -262,5 +265,14 @@ export const MIGRATIONS: Migration[] = [
     // that already exists at migration time is treated as already set up.
     sql: `ALTER TABLE companies ADD COLUMN onboarded INTEGER NOT NULL DEFAULT 0;
           UPDATE companies SET onboarded = 1;`,
+  },
+  {
+    name: "0007_drop_redundant_indexes",
+    // Both indexes only duplicated the leading column of an existing UNIQUE index on
+    // the same table (reactions(message_id, emoji, reactor), capability_grants(employee_id,
+    // scope)) — SQLite already indexes that leading column via the unique constraint,
+    // so these added write overhead on every insert with zero query benefit (report §4.8).
+    sql: `DROP INDEX IF EXISTS idx_reactions_message;
+          DROP INDEX IF EXISTS idx_capability_grants_employee;`,
   },
 ];

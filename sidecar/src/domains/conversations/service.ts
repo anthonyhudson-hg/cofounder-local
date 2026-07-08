@@ -430,6 +430,10 @@ export async function sendMessage(
       .set({
         content: full,
         status: result.success ? "complete" : "error",
+        // Previously left null on failure — the DM error bubble showed zero
+        // diagnostic content even though the provider had a specific reason
+        // (report §4.10).
+        error_message: result.success ? null : (result.errorMessage ?? "The assistant did not complete this response."),
         input_tokens: result.usage.inputTokens,
         output_tokens: result.usage.outputTokens,
         cache_creation_input_tokens: result.usage.cacheCreationInputTokens,

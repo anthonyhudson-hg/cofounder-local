@@ -130,12 +130,26 @@ export interface ApplyOnboardingInput {
 /** Persists the finalized onboarding: company profile/prompt/name, hires, channels; marks onboarded. */
 export async function applyOnboarding(ctx: RuntimeContext, input: ApplyOnboardingInput): Promise<{ ok: true }> {
   await mutate(ctx, async (trx, emit) => {
-    await trx
+    const updated = await trx
       .updateTable("companies")
       .set({ name: input.companyName || "My Company", profile: input.profile, system_prompt: input.systemPrompt, onboarded: 1 })
       .where("id", "=", input.companyId)
-      .execute();
+      .executeTakeFirst();
+    if (!updated.numUpdatedRows) throw new Error(`company ${input.companyId} not found`);
 
+    // Every NEW department previously got the literal position 0 — colliding with the
+    // "Executive" department already seeded at position 0 by company creation — instead
+    // of a distinct, increasing position like createDepartment computes elsewhere
+    // (report §4.3).
+    const maxPos = await trx
+      .selectFrom("departments")
+      .where("company_id", "=", input.companyId)
+      .select(trx.fn.max("position").as("m"))
+      .executeTakeFirst();
+    let nextPosition = (Number(maxPos?.m ?? -1) || -1) + 1;
+    const assignedDepartmentPositions = new Set<string>();
+
+    const newEmployeeIds: string[] = [];
     for (const role of input.roles) {
       const conversationId = randomUUID();
       const employeeId = randomUUID();
@@ -144,18 +158,38 @@ export async function applyOnboarding(ctx: RuntimeContext, input: ApplyOnboardin
         .insertInto("employees")
         .values({ id: employeeId, company_id: input.companyId, conversation_id: conversationId, job_title: role.jobTitle, department: role.department, mission: role.mission })
         .execute();
+      newEmployeeIds.push(employeeId);
+
       // ensure the department exists
-      await trx
-        .insertInto("departments")
-        .values({ id: randomUUID(), company_id: input.companyId, name: role.department, position: 0 })
-        .onConflict((oc) => oc.columns(["company_id", "name"]).doNothing())
-        .execute();
+      if (!assignedDepartmentPositions.has(role.department)) {
+        assignedDepartmentPositions.add(role.department);
+        await trx
+          .insertInto("departments")
+          .values({ id: randomUUID(), company_id: input.companyId, name: role.department, position: nextPosition })
+          .onConflict((oc) => oc.columns(["company_id", "name"]).doNothing())
+          .execute();
+        nextPosition += 1;
+      }
     }
 
+    const newChannelIds: string[] = [];
     for (const name of input.channels) {
       const clean = name.replace(/^#/, "").trim();
       if (!clean || clean === "general") continue;
-      await trx.insertInto("conversations").values({ id: randomUUID(), company_id: input.companyId, kind: "channel", name: clean }).execute();
+      const channelId = randomUUID();
+      await trx.insertInto("conversations").values({ id: channelId, company_id: input.companyId, kind: "channel", name: clean }).execute();
+      newChannelIds.push(channelId);
+    }
+
+    // The suggestion step deliberately correlates suggested channels with the roles
+    // being hired (e.g. an Engineering role suggests a "product" channel), but the
+    // channel-creation loop above never added any of the new hires to them — an empty
+    // channel undercuts the stated onboarding goal. Add every newly-hired employee to
+    // every newly-created channel (report §4.4).
+    for (const channelId of newChannelIds) {
+      for (const employeeId of newEmployeeIds) {
+        await trx.insertInto("channel_memberships").values({ id: randomUUID(), conversation_id: channelId, employee_id: employeeId }).execute();
+      }
     }
 
     await emit({ companyId: input.companyId, type: "company.onboarded", subjectId: input.companyId, actor: { kind: "user" }, payload: { roles: input.roles.length, channels: input.channels.length } });

@@ -38,6 +38,14 @@ export interface TurnResult {
   success: boolean;
   usage: UsagePayload;
   totalCostUsd: number;
+  /**
+   * Populated when `success` is false and the provider observed a specific reason
+   * (e.g. Claude's `subtype`/`errors` on a non-success result — rate limit, max-turns,
+   * refusal). Previously this was lost entirely: `sendMessage` set `status: "error"`
+   * with no `error_message`, showing a DM error bubble with zero diagnostic content
+   * (report §4.10).
+   */
+  errorMessage?: string;
 }
 
 /**

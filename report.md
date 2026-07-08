@@ -311,35 +311,50 @@ Related, same file:
 - **MEDIUM — maintainability**: ~130 lines of duplicated spawn/wire-stdout/wait-task logic between the sidecar and runtime process management (179-271 vs. 356-454) — any fix to the above has to be applied twice. — ✅ DONE: extracted into a shared `spawn_node_process`/`watch_for_exit`.
 - **LOW — architecture**: `send_to_runtime` forwards unvalidated JSON straight to the privileged, DB-owning process (§1.4/§2.6) with zero shape/size check — pure pass-through, no defense-in-depth. — ✅ DONE (partial): now rejects non-object payloads; no size cap yet.
 
-### 4.3 — Onboarding: new departments hardcode `position: 0` — MEDIUM
+### 4.3 — Onboarding: new departments hardcode `position: 0` — MEDIUM — ✅ DONE
+
+**Fix applied:** `applyOnboarding` now computes `MAX(position)+1` once and increments it per distinct new department name within the transaction, instead of hardcoding `0` for every one.
+
 **File:** `sidecar/src/domains/onboarding/service.ts:150`
 
 Every department created during onboarding gets `position: 0`, colliding with the "Executive" department already seeded at `position: 0` (`companies/service.ts:seedDefaults`). Suggest an Engineering and a Marketing role and you get three departments all sharing `position: 0` — the deterministic-ordering column this exists for is defeated. `employees/service.ts:createDepartment` already computes `MAX(position)+1` correctly elsewhere in the same codebase.
 
 **Fix:** reuse that next-position logic instead of the literal `0`.
 
-### 4.4 — Onboarding creates channels but never adds the new hires to them — MEDIUM
+### 4.4 — Onboarding creates channels but never adds the new hires to them — MEDIUM — ✅ DONE
+
+**Fix applied:** `applyOnboarding` now adds every newly-hired employee to every newly-created channel within the same transaction (interpreting "correlate channels with the roles being hired" as "the whole new-hire cohort," since the wire payload doesn't carry a per-role channel linkage to reconstruct a stricter mapping).
+
 **File:** `sidecar/src/domains/onboarding/service.ts:139-159`
 
 The suggestion step deliberately correlates channels with roles (Engineering role → suggest a "product" channel), but `applyOnboarding`'s role loop and channel loop are entirely disjoint — no `channel_memberships` row is ever inserted linking them. Result: an empty "product" channel and an Engineer who isn't in it.
 
 **Fix:** after creating a role + its correlated channel, insert the membership row, mirroring what `seedDefaults` already does for the CoS + #general.
 
-### 4.5 — `removeCompany` doesn't cascade-delete secrets, capability grants, agent profiles/memory — MEDIUM-HIGH
+### 4.5 — `removeCompany` doesn't cascade-delete secrets, capability grants, agent profiles/memory — MEDIUM-HIGH — ✅ DONE
+
+**Fix applied:** `removeCompany` now also deletes `secrets`/`capability_grants`/`agent_memory` (by `company_id`) and `agent_profiles` (by `employee_id IN (...)`) within the same transaction as the rest of the cascade.
+
 **File:** `sidecar/src/domains/companies/service.ts:187-212`
 
 The delete cascades through `reactions` → `relevance_checks` → `agent_sessions` → `channel_memberships` → `messages` → `employee_responsibilities` → `employees` → `conversations` → `departments` → `companies`, but never touches `secrets` (company-scoped — **this includes the GitHub PAT from §2.2**), `capability_grants`, `agent_profiles`, or `agent_memory`. These become permanently orphaned rows referencing a company/employee that no longer exists. Most notably: a deleted company's vault-encrypted PAT is never purged and sits indefinitely with nothing left to ever reference or clean it up.
 
 **Fix:** add the four missing tables to the same cascade transaction, scoped by `companyId`/`empIds`.
 
-### 4.6 — No `ON DELETE` behavior on any foreign key in the schema — MEDIUM
+### 4.6 — No `ON DELETE` behavior on any foreign key in the schema — MEDIUM — ⚠️ NOT DONE
+
+**Deliberately deferred.** SQLite has no `ALTER TABLE ... ADD/ALTER FOREIGN KEY` — retrofitting cascade behavior onto existing FKs requires the full 12-step table-recreation dance (create new table, copy data, drop old, rename, recreate every index) across ~10 tables. That's a large, genuinely risky schema migration that deserves its own dedicated, carefully-tested effort, not a rushed pass alongside 70+ other fixes — attempting it here under time pressure is exactly how "no regressions" claims turn out to be wrong. `removeCompany` (§4.5) now cascades everything it's supposed to at the application layer, which covers the practical exposure today. Noted honestly as not done rather than silently skipped or half-attempted.
+
 **File:** `sidecar/src/db/migrations.ts` (entire `BASELINE_SQL`, 18-147, and later blocks)
 
 Every FK (`employees.conversation_id`, `messages.conversation_id`, `channel_memberships.*`, `capability_grants.employee_id`, `agent_memory.employee_id`, etc.) is a bare `REFERENCES` with no `CASCADE`/`SET NULL`. Since `foreign_keys = ON` is enforced (`db/index.ts:27`), any parent-row delete hard-fails unless every dependent table is manually cleaned up first, in the correct order, by hand — which is exactly how §4.5 happened, and exactly how the next delete feature will independently rediscover the same trap.
 
 **Fix:** add explicit `ON DELETE CASCADE`/`SET NULL` to the FKs meant to cascade; document the ones that intentionally don't.
 
-### 4.7 — Migrator: baseline adoption is unverified — MEDIUM
+### 4.7 — Migrator: baseline adoption is unverified — MEDIUM — ✅ DONE
+
+**Fix applied:** `verifyBaselineSchema` runs `BASELINE_SQL` against a throwaway in-memory SQLite database (letting SQLite's own parser derive the expected table/column set, rather than hand-rolling a DDL parser) and diffs it against the real database's `PRAGMA table_info` for every table before recording `0001_baseline` as adopted; mismatches throw loudly instead of silently succeeding. This actually caught a real bug while implementing it: the existing test's "existing DB" fixture was a bare one-column stub, not a realistic legacy schema — fixed the test to use the full `BASELINE_SQL` and added a new negative test proving a genuinely incomplete schema is now correctly rejected. Also added a concurrency guard (two processes racing the first migration: the loser now catches "table already exists" and baselines onto the winner's result instead of crashing), and `schemaVersion` is now derived from actually-applied `schema_migrations` rows instead of just `MIGRATIONS.length`.
+
 **File:** `sidecar/src/db/migrator.ts:38-63`
 
 When adopting a pre-existing (Rust-migrated) database, the only check is `tableExists(sqlite, "companies")`. If that one table exists, `0001_baseline` is marked applied **without ever running its SQL** and without checking that any other table/column/index in the hand-transcribed `BASELINE_SQL` actually matches the real legacy schema. Drift becomes silent and unrecoverable — no later migration will ever create a missing table/column; it only surfaces as a runtime "no such table/column" error.
@@ -350,31 +365,42 @@ Related, same file:
 - **MEDIUM — concurrency**: two processes racing the first migration on a fresh DB (plausible given §4.2's lifecycle fragility, or simply running dev twice against the shared `os.tmpdir()/cofounder-dev.db` fallback in `db/index.ts:18`) — the loser's `CREATE TABLE companies` throws "table already exists" and crashes that process's startup instead of detecting "already applied." Catch and re-check instead of crashing, or take a file lock around the migration run.
 - **LOW**: `schemaVersion` is just `MIGRATIONS.length`, not derived from actually-applied rows — meaningless if a migration is ever removed/reordered.
 
-### 4.8 — Dead schema, redundant indexes — LOW
+### 4.8 — Dead schema, redundant indexes — LOW — ⚠️ PARTIAL
+
+**Fix applied:** new migration `0007_drop_redundant_indexes` drops `idx_reactions_message` and `idx_capability_grants_employee` (both redundant with an existing UNIQUE index's leading column) — safe, additive-only, no table recreation needed.
+
+**Not done:** dropping the dead `event_outbox`/`agent_profiles` tables — `agent_profiles` is no longer purely dead now that §4.5's cascade delete references it, and dropping either table is still a schema change with its own risk profile; left alone rather than rushed. The `channel_memberships` missing-unique-constraint item is also not done: a partial unique index is easy to *add*, but if any existing user's DB already has a duplicate-active-membership row (possible given the pre-existing read-then-write race this same finding describes), the migration would throw and block that user's app from starting entirely — needs a data-cleanup step first, deferred as a follow-up rather than risked here.
+
 **File:** `sidecar/src/db/migrations.ts`
 
 - `event_outbox` and `agent_profiles` tables exist in the schema (167-176, 225-232) but are never read or written anywhere in `sidecar/src` — scaffolding for features that never got wired up.
 - `idx_reactions_message` (97) and `idx_capability_grants_employee` (206) are redundant with the leading column of an existing `UNIQUE` constraint on the same table — pure write overhead, zero query benefit. Drop them.
 - `channel_memberships` has no DB-level constraint (e.g. a partial `UNIQUE ... WHERE effective_to IS NULL`) preventing two concurrently-active membership rows for the same pair — the invariant is only as safe as `employees/service.ts:toggleMembership` staying correct forever.
 
-### 4.9 — `data/repositories.ts` — the advertised safety boundary isn't actually used — MEDIUM
+### 4.9 — `data/repositories.ts` — the advertised safety boundary isn't actually used — MEDIUM — ⚠️ PARTIAL (comment fixed; not migrated)
+
+**Fix applied:** rewrote the file's docstring to accurately describe reality — that this is a Phase-A proof of concept most domain services do not route through, rather than an enforced guarantee. **Not done:** migrating real domain services to route through `repos.forCompany()` is a large, cross-cutting refactor touching essentially every service file in `sidecar/src/domains/`; out of scope for this pass, and correctly so — that's a design decision worth its own dedicated effort, not something to rush.
+
 **File:** `sidecar/src/data/repositories.ts:4-13, 42-49`
 
 The docstring claims this is "the structural company-scoping boundary... cross-company leakage is impossible by construction," and that all reads/writes go through `repos.forCompany(companyId)`. In reality, `forCompany(companyId).listConversations()` is called **only from the test suite**. The actually-used `listConversations` (wired to the UI via `domains/register.ts`) is a completely separate implementation in `conversations/service.ts` that talks to `ctx.db` directly, selects different columns, and orders differently. Every other domain service follows the same direct-`ctx.db` pattern. Two divergent implementations of the same query now exist and will drift further; the advertised safety guarantee isn't enforced for the vast majority of company-scoped queries.
 
 **Fix:** either finish the migration (route real domain services through `repos.forCompany`) or delete the unused proof-of-concept and correct the comment.
 
-### 4.10 — Conversation error status has no error message — MEDIUM
+### 4.10 — Conversation error status has no error message — MEDIUM — ✅ DONE
+
+**Fix applied:** `TurnResult` gained an optional `errorMessage` field, populated by `ClaudeProvider` from the SDK's non-success `subtype`/`errors` when a turn fails without throwing (rate limit, max-turns, refusal). `sendMessage` now writes it into the `error_message` column instead of leaving it null.
+
 **File:** `sidecar/src/domains/conversations/service.ts:391-404`
 
 When `result.success` is `false` (rate limit, max-turns, refusal from the SDK), the code sets `status: "error"` but never populates `error_message`, even though the column exists and `insertErrorMessage`/`setMessageError` in the same file both use it correctly. `TurnResult` (`providers/types.ts`) doesn't even carry an error string to preserve. The DM error path shows zero diagnostic content while the channel-orchestration path shows something.
 
 **Fix:** have `TurnResult` carry an optional `errorMessage` (from `message.subtype`/`message.result` on failure) and thread it into the `error_message` column here.
 
-### 4.11 — Minor domain-service issues
-- **`companies/service.ts` LOW-MEDIUM** (122-133, 187-212): deleting the active company doesn't itself update `active_company_id` — it relies on the frontend making a *second*, separate IPC call after `removeCompany` returns. If the app dies between the two calls, `settings.active_company_id` points at a dead row forever, and nothing that reads it checks existence. Fix: update the fallback id inside the same transaction as the delete.
-- **`companies/service.ts` LOW**: `updateCompany` discards the update result — a stale/unknown `companyId` silently no-ops instead of erroring. Same pattern in `onboarding/service.ts:applyOnboarding` (133-137).
-- **`employees/service.ts` LOW** (54-73): `createEmployee` doesn't trim/require `input.name`, unlike `createChannel`/`createGroup` elsewhere in the same file — a whitespace-only name silently creates a blank-labeled employee.
+### 4.11 — Minor domain-service issues — ✅ DONE (all four items)
+- **`companies/service.ts` LOW-MEDIUM** (122-133, 187-212): deleting the active company doesn't itself update `active_company_id` — it relies on the frontend making a *second*, separate IPC call after `removeCompany` returns. If the app dies between the two calls, `settings.active_company_id` points at a dead row forever, and nothing that reads it checks existence. Fix: update the fallback id inside the same transaction as the delete. — ✅ DONE.
+- **`companies/service.ts` LOW**: `updateCompany` discards the update result — a stale/unknown `companyId` silently no-ops instead of erroring. Same pattern in `onboarding/service.ts:applyOnboarding` (133-137). — ✅ DONE: both now check `numUpdatedRows` and throw if zero rows matched.
+- **`employees/service.ts` LOW** (54-73): `createEmployee` doesn't trim/require `input.name`, unlike `createChannel`/`createGroup` elsewhere in the same file — a whitespace-only name silently creates a blank-labeled employee. — ✅ DONE (fixed earlier, alongside §4.1).
 - **`approvals/service.ts` LOW** (40-52): `resolveApproval`'s `decision` param is only compile-time-restricted to `"approved"|"denied"`; the one caller does an unchecked `as` cast on IPC input (§1.4), so a malformed payload could reach the `status` column with an arbitrary string SQLite won't reject. — ✅ DONE: `register.ts`'s `command:approval.resolve` handler now validates `decision` before calling `resolveApproval`.
 
 ---

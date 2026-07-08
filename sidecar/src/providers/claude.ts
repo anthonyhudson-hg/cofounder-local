@@ -12,6 +12,7 @@ export class ClaudeProvider implements AgentProvider {
     let usage: UsagePayload = { ...ZERO_USAGE };
     let totalCostUsd = 0;
     let success = false;
+    let errorMessage: string | undefined;
     // Tracks whether a "result" message was actually observed — previously, if the
     // stream ended without one (subprocess crash mid-stream), this silently returned
     // `success:false` with zero explanation, indistinguishable from the case where
@@ -54,6 +55,10 @@ export class ClaudeProvider implements AgentProvider {
             cacheCreationInputTokens: u.cache_creation_input_tokens ?? 0,
             cacheReadInputTokens: u.cache_read_input_tokens ?? 0,
           };
+          if (!success) {
+            const errors = "errors" in message && Array.isArray(message.errors) ? message.errors : [];
+            errorMessage = errors.length ? `${message.subtype}: ${errors.join("; ")}` : message.subtype;
+          }
         }
       }
     } finally {
@@ -72,6 +77,7 @@ export class ClaudeProvider implements AgentProvider {
       success,
       usage,
       totalCostUsd,
+      errorMessage,
     };
   }
 }
