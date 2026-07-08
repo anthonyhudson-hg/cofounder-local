@@ -132,6 +132,14 @@ export function useConversation(
           },
           companyId,
           (channel, data) => {
+            if (channel === "meta") {
+              // Fires once, right after the server persists the placeholder — well
+              // before the first text chunk — so "Debug" on an in-flight message
+              // shows real data immediately instead of nothing until it completes.
+              const { debugPayload } = data as { messageId: string; debugPayload: string };
+              applyPatch(assistantMsgId, { debug_payload: debugPayload });
+              return;
+            }
             if (channel !== "text") return;
             const { text: chunk } = data as { messageId: string; text: string };
             const current = messagesRef.current.find((m) => m.id === assistantMsgId);

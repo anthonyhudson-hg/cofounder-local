@@ -308,43 +308,39 @@ register("command:reactionNotices.consume", async (ctx, inbound) => {
   return { notices: await consumeReactionNotices(ctx, employeeId, userFullName) };
 });
 
+interface SendMessagePayload {
+  conversationId: string;
+  text: string;
+  model?: string;
+  effort?: string;
+  provider?: string | null;
+  replyTo?: { messageId: string; threadRootId: string | null } | null;
+}
+
 register("command:message.send", async (ctx, inbound, sink) => {
-  const cmd = inbound as CommandEnvelope<
-    "message.send",
-    {
-      conversationId: string;
-      text: string;
-      model?: string;
-      effort?: string;
-      provider?: string | null;
-      replyTo?: { messageId: string; threadRootId: string | null } | null;
-    }
-  >;
+  const payload = p<SendMessagePayload>(inbound);
   return sendMessage(
     ctx,
     {
       companyId: requireCompany(inbound),
-      conversationId: cmd.payload.conversationId,
-      text: cmd.payload.text,
-      model: cmd.payload.model,
-      effort: validateEffort(cmd.payload.effort),
-      provider: cmd.payload.provider ?? null,
-      replyTo: cmd.payload.replyTo ?? null,
+      conversationId: payload.conversationId,
+      text: payload.text,
+      model: payload.model,
+      effort: validateEffort(payload.effort),
+      provider: payload.provider ?? null,
+      replyTo: payload.replyTo ?? null,
     },
     sink,
   );
 });
 
 register("command:message.sendChannel", async (ctx, inbound) => {
-  const cmd = inbound as CommandEnvelope<
-    "message.sendChannel",
-    { conversationId: string; text: string; replyTo?: { messageId: string; threadRootId: string | null } | null }
-  >;
+  const payload = p<{ conversationId: string; text: string; replyTo?: { messageId: string; threadRootId: string | null } | null }>(inbound);
   return sendChannelMessage(ctx, {
     companyId: requireCompany(inbound),
-    conversationId: cmd.payload.conversationId,
-    text: cmd.payload.text,
-    replyTo: cmd.payload.replyTo ?? null,
+    conversationId: payload.conversationId,
+    text: payload.text,
+    replyTo: payload.replyTo ?? null,
   });
 });
 

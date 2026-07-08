@@ -481,6 +481,14 @@ export async function sendMessage(
     await emit({ companyId: input.companyId, type: "message.created", subjectId: assistantMessageId, actor: { kind: "employee", employeeId: employee.id }, payload: { role: "assistant", conversationId: input.conversationId } });
   });
 
+  // The debug payload is already fully computed and persisted at this point, but
+  // the client's optimistic placeholder was built before this command resolved and
+  // has no debug_payload yet — without this delta, "Debug" on an in-flight message
+  // showed nothing until the whole turn finished and the client's post-send
+  // reload() ran. Sent as its own "meta" channel (distinct from "text") so the
+  // client can patch it in immediately, well before the first text chunk arrives.
+  sink.delta("meta", { messageId: assistantMessageId, debugPayload });
+
   // 5. run the provider, streaming text deltas; a thrown error here is caught
   // and persisted as a normal error message rather than failing the command.
   let success: boolean;

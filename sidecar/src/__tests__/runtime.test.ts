@@ -142,8 +142,8 @@ test("chat turn loop (runtime): streams, persists messages, resumes session", as
     },
   };
 
-  const deltas: string[] = [];
-  const sink = { delta: (_c: string, d: unknown) => deltas.push((d as { text: string }).text) };
+  const allDeltas: { channel: string; data: unknown }[] = [];
+  const sink = { delta: (channel: string, data: unknown) => allDeltas.push({ channel, data }) };
 
   const events: string[] = [];
   ctx.bus.subscribe((e) => events.push(e.type));
@@ -155,8 +155,21 @@ test("chat turn loop (runtime): streams, persists messages, resumes session", as
     fakeProvider as never,
   );
 
-  // streamed both chunks
-  assert.deepEqual(deltas, ["Hello, ", "you said: ping"]);
+  // streamed both text chunks
+  const textDeltas = allDeltas.filter((d) => d.channel === "text").map((d) => (d.data as { text: string }).text);
+  assert.deepEqual(textDeltas, ["Hello, ", "you said: ping"]);
+
+  // the debug-payload "meta" delta fires exactly once, before any text delta, so
+  // an in-flight message's debug info is available immediately rather than only
+  // after the whole turn (and the client's post-send reload()) completes.
+  const metaIndex = allDeltas.findIndex((d) => d.channel === "meta");
+  const firstTextIndex = allDeltas.findIndex((d) => d.channel === "text");
+  assert.ok(metaIndex !== -1, "expected a meta delta");
+  assert.ok(metaIndex < firstTextIndex, "meta delta must precede text deltas");
+  const metaPayload = allDeltas[metaIndex].data as { messageId: string; debugPayload: string };
+  assert.equal(metaPayload.messageId, res.assistantMessageId);
+  const parsedDebug = JSON.parse(metaPayload.debugPayload);
+  assert.equal(parsedDebug.prompt, "ping");
 
   // persisted user + assistant messages (on top of the seeded CoS greeting)
   const msgs = await ctx.db
