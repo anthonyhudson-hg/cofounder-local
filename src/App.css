@@ -1709,6 +1709,31 @@ body {
   }
 }
 
+.tool-activity {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 6px;
+  color: #8a8a8a;
+  font-size: 0.82rem;
+  font-style: italic;
+}
+
+.tool-activity-spinner {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1.5px solid #d8d5e0;
+  border-top-color: #5b52e0;
+  animation: tool-activity-spin 0.7s linear infinite;
+}
+
+@keyframes tool-activity-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /* ---------- Composer ---------- */
 
 .composer-wrap {

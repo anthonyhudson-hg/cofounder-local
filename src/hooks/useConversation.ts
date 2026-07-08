@@ -10,6 +10,12 @@ export interface ReplyTarget {
   threadRootId: string | null;
 }
 
+/** A tool call the streaming assistant message is currently making, or just finished. */
+export interface ActiveTool {
+  messageId: string;
+  name: string;
+}
+
 interface SendMessageResult {
   userMessageId: string;
   assistantMessageId: string;
@@ -35,6 +41,7 @@ export function useConversation(
   const [replyCounts, setReplyCounts] = useState<Record<string, number>>({});
   const [reactions, setReactions] = useState<Record<string, string[]>>({});
   const [sending, setSending] = useState(false);
+  const [activeTool, setActiveTool] = useState<ActiveTool | null>(null);
   const messagesRef = useRef<Message[]>([]);
   // This hook is not remounted per conversationId (no `key` on ChatPane), so a fast DM
   // switch can otherwise let an older conversation's slower response land after the new
@@ -140,6 +147,13 @@ export function useConversation(
               applyPatch(assistantMsgId, { debug_payload: debugPayload });
               return;
             }
+            if (channel === "tool") {
+              // "start"/"end" mirror the model's own tool_use content block
+              // lifecycle (see providers/claude.ts) — real activity, not a guess.
+              const { name, phase } = data as { messageId: string; name: string; phase: "start" | "end" };
+              setActiveTool(phase === "start" ? { messageId: assistantMsgId, name } : null);
+              return;
+            }
             if (channel !== "text") return;
             const { text: chunk } = data as { messageId: string; text: string };
             const current = messagesRef.current.find((m) => m.id === assistantMsgId);
@@ -172,10 +186,14 @@ export function useConversation(
         }
         useAgentActivity.getState().setActive(employee.id, false);
         setSending(false);
+        // Defensive: a content_block_stop should always pair with the start that
+        // set this, but don't let a turn-ending error strand a stale "Using X…"
+        // indicator once the turn is over regardless.
+        setActiveTool(null);
       }
     },
     [conversationId, companyId, employee, onActivity, applyPatch, reload, reloadReactions],
   );
 
-  return { messages, replyCounts, reactions, toggleReaction, send, sending, reload };
+  return { messages, replyCounts, reactions, toggleReaction, send, sending, activeTool, reload };
 }

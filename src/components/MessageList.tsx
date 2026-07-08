@@ -23,6 +23,8 @@ interface Props {
   replyCounts: Record<string, number>;
   onOpenThread: (rootMessageId: string) => void;
   onReply: (message: Message) => void;
+  /** The message + tool name currently being called mid-turn, if any (see useConversation). */
+  activeTool?: { messageId: string; name: string } | null;
 }
 
 // Shared sentinel so messages with no reactions all pass the same referentially-stable
@@ -46,6 +48,7 @@ export function MessageList({
   replyCounts,
   onOpenThread,
   onReply,
+  activeTool,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
@@ -123,6 +126,7 @@ export function MessageList({
             onReply={onReply}
             replyAuthorName={replyAuthorName}
             replySnippet={replySnippet}
+            activeToolName={activeTool?.messageId === m.id ? activeTool.name : undefined}
           />
         );
       })}

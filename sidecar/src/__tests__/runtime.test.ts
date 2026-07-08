@@ -341,11 +341,14 @@ test("chat turn loop (runtime): streams, persists messages, resumes session", as
     .select(["id", "conversation_id"])
     .executeTakeFirstOrThrow();
 
-  // fake provider: streams two chunks, returns a session id + usage
+  // fake provider: streams two text chunks plus a tool-activity start/end pair,
+  // returns a session id + usage
   const fakeProvider = {
     async *runTurn(opts: { prompt: string }) {
-      yield "Hello, ";
-      yield `you said: ${opts.prompt}`;
+      yield { kind: "text", text: "Hello, " };
+      yield { kind: "tool", name: "memory_write", phase: "start" };
+      yield { kind: "tool", name: "memory_write", phase: "end" };
+      yield { kind: "text", text: `you said: ${opts.prompt}` };
       return {
         sessionId: "sess-123",
         success: true,
@@ -371,6 +374,16 @@ test("chat turn loop (runtime): streams, persists messages, resumes session", as
   // streamed both text chunks
   const textDeltas = allDeltas.filter((d) => d.channel === "text").map((d) => (d.data as { text: string }).text);
   assert.deepEqual(textDeltas, ["Hello, ", "you said: ping"]);
+
+  // tool-activity chunks reach the client on their own "tool" delta channel,
+  // not mixed into the text stream and not silently dropped.
+  const toolDeltas = allDeltas
+    .filter((d) => d.channel === "tool")
+    .map((d) => d.data as { messageId: string; name: string; phase: string });
+  assert.deepEqual(toolDeltas, [
+    { messageId: res.assistantMessageId, name: "memory_write", phase: "start" },
+    { messageId: res.assistantMessageId, name: "memory_write", phase: "end" },
+  ]);
 
   // the debug-payload "meta" delta fires exactly once, before any text delta, so
   // an in-flight message's debug info is available immediately rather than only
@@ -422,7 +435,7 @@ test("sendMessage (DM, full cutover parity): reply-threading persists thread_roo
 
   const provider = {
     async *runTurn() {
-      yield "Sounds good!\n[[react:👍]]";
+      yield { kind: "text", text: "Sounds good!\n[[react:👍]]" };
       return {
         sessionId: "sess-thread",
         success: true,
@@ -505,13 +518,16 @@ test("sendChannelMessage (full cutover — new server-side orchestration, no cli
   const relevanceProvider = {
     async *runTurn(opts: { prompt: string }) {
       relevanceCalls.push(opts.prompt);
-      yield '{"respond": false, "reason": "not relevant"}';
+      yield { kind: "text", text: '{"respond": false, "reason": "not relevant"}' };
       return { sessionId: null, success: true, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }, totalCostUsd: 0 };
     },
   };
   const responderProvider = {
     async *runTurn() {
-      yield '```control\n{"respondsWithText": true, "replyToMessageId": null, "threadRootId": null, "reactions": []}\n```\nOn it!';
+      yield {
+        kind: "text",
+        text: '```control\n{"respondsWithText": true, "replyToMessageId": null, "threadRootId": null, "reactions": []}\n```\nOn it!',
+      };
       return {
         sessionId: "sess-chan",
         success: true,

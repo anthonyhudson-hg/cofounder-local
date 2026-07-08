@@ -513,8 +513,12 @@ export async function sendMessage(
         memoryWriteTool: { ctx, companyId: input.companyId, employeeId: employee.id, correlationId: input.correlationId ?? null },
       }),
       (chunk) => {
-        full += chunk;
-        sink.delta("text", { messageId: assistantMessageId, text: chunk });
+        if (chunk.kind === "text") {
+          full += chunk.text;
+          sink.delta("text", { messageId: assistantMessageId, text: chunk.text });
+        } else {
+          sink.delta("tool", { messageId: assistantMessageId, name: chunk.name, phase: chunk.phase });
+        }
       },
     );
 
@@ -663,8 +667,8 @@ async function checkMemberRelevance(
     let raw = "";
     await drainTurn(
       provider.runTurn({ model: RELEVANCE_CHECK_MODEL, effort: "low", systemPrompt, prompt: triggerMessage }),
-      (text) => {
-        raw += text;
+      (chunk) => {
+        if (chunk.kind === "text") raw += chunk.text;
       },
     );
     try {
@@ -840,8 +844,11 @@ export async function sendChannelMessage(
             resumeSessionId,
             memoryWriteTool: { ctx, companyId: input.companyId, employeeId: member.id, correlationId: input.correlationId ?? null },
           }),
-          (text) => {
-            fullText += text;
+          (chunk) => {
+            // Channel replies never streamed to the UI before or after the full
+            // cutover (no sink is threaded into sendChannelMessage) — tool-activity
+            // chunks have nowhere to go either, so only text is accumulated here.
+            if (chunk.kind === "text") fullText += chunk.text;
           },
         );
 

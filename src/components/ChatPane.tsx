@@ -184,7 +184,7 @@ function DmChatPane({
   onOpenSidebar,
   onActivity,
 }: Props) {
-  const { messages, replyCounts, reactions, toggleReaction, send, sending } = useConversation(
+  const { messages, replyCounts, reactions, toggleReaction, send, sending, activeTool } = useConversation(
     conversation.id,
     companyId,
     employee,
@@ -259,6 +259,7 @@ function DmChatPane({
           replyCounts={replyCounts}
           onOpenThread={setOpenThreadId}
           onReply={setReplyingTo}
+          activeTool={activeTool}
         />
 
         <Composer

@@ -7,7 +7,7 @@ import type {
   ModelReasoningEffort,
   ThreadOptions,
 } from "@openai/codex-sdk";
-import { AgentProvider, Effort, RunTurnOptions, TurnResult, UsagePayload, ZERO_USAGE } from "./types";
+import { AgentProvider, Effort, RunTurnOptions, TurnChunk, TurnResult, UsagePayload, ZERO_USAGE } from "./types";
 
 /*
  * OpenAI Codex provider. Structural analog to the Claude Agent SDK: the
@@ -76,7 +76,7 @@ function mapEffort(effort: Effort): ModelReasoningEffort {
 }
 
 export class CodexProvider implements AgentProvider {
-  async *runTurn(opts: RunTurnOptions): AsyncGenerator<string, TurnResult, void> {
+  async *runTurn(opts: RunTurnOptions): AsyncGenerator<TurnChunk, TurnResult, void> {
     const codex = await getClient();
 
     // Codex has no dedicated system-prompt channel like the Claude Agent SDK,
@@ -147,7 +147,11 @@ export class CodexProvider implements AgentProvider {
               break;
             case "item.completed":
               if (event.item.type === "agent_message" && event.item.text) {
-                yield event.item.text;
+                // Codex's SDK only surfaces a completed agent_message as one whole
+                // block, same as Claude's non-streaming path did before
+                // includePartialMessages — no per-token delta option is exposed by
+                // @openai/codex-sdk today, so this is real but coarser streaming.
+                yield { kind: "text", text: event.item.text };
               }
               break;
             case "turn.completed":

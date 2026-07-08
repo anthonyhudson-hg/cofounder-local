@@ -1,5 +1,5 @@
 import type { query } from "@anthropic-ai/claude-agent-sdk";
-import { AgentProvider, RunTurnOptions, TurnResult, UsagePayload, ZERO_USAGE } from "./types";
+import { AgentProvider, RunTurnOptions, TurnChunk, TurnResult, UsagePayload, ZERO_USAGE } from "./types";
 import { buildMemoryWriteToolDef, MEMORY_WRITE_ALLOWED_TOOL, MEMORY_WRITE_MCP_SERVER_NAME } from "./claudeMemoryTool";
 
 /**
@@ -34,7 +34,7 @@ function getSdk(): Promise<typeof import("@anthropic-ai/claude-agent-sdk")> {
 }
 
 export class ClaudeProvider implements AgentProvider {
-  async *runTurn(opts: RunTurnOptions): AsyncGenerator<string, TurnResult, void> {
+  async *runTurn(opts: RunTurnOptions): AsyncGenerator<TurnChunk, TurnResult, void> {
     const { query, tool, createSdkMcpServer } = await getSdk();
     let sessionId: string | undefined;
     let usage: UsagePayload = { ...ZERO_USAGE };
@@ -46,6 +46,10 @@ export class ClaudeProvider implements AgentProvider {
     // `success:false` with zero explanation, indistinguishable from the case where
     // `query()` throws outright (report §3.2).
     let resultObserved = false;
+    // content_block_start doesn't repeat the block's type/name on content_block_stop
+    // (that event is just {index, type}) — track what each open index is so a
+    // "tool" end chunk can be paired with its "start" once the block closes.
+    const openBlocks = new Map<number, { toolName: string }>();
 
     const abortController = new AbortController();
     const timer = opts.timeoutMs ? setTimeout(() => abortController.abort(), opts.timeoutMs) : null;
@@ -73,6 +77,12 @@ export class ClaudeProvider implements AgentProvider {
           effort: opts.effort,
           systemPrompt: opts.systemPrompt,
           resume: opts.resumeSessionId ?? undefined,
+          // Without this, query() only ever surfaces one complete SDKAssistantMessage
+          // per turn (block.text already fully assembled) — "streaming" that was
+          // really just one big chunk at the end. This turns on the SDK's
+          // content_block_start/_delta/_stop stream_events, handled below, which is
+          // where real token-level text deltas and tool-call-start/stop actually live.
+          includePartialMessages: true,
           ...toolOptions,
           abortController,
         },
@@ -81,9 +91,24 @@ export class ClaudeProvider implements AgentProvider {
           sessionId = message.session_id;
         }
 
-        if (message.type === "assistant") {
-          for (const block of message.message.content) {
-            if (block.type === "text" && block.text) yield block.text;
+        if (message.type === "stream_event") {
+          const event = message.event;
+          if (event.type === "content_block_start") {
+            const block = event.content_block;
+            if (block.type === "tool_use" || block.type === "mcp_tool_use") {
+              openBlocks.set(event.index, { toolName: block.name });
+              yield { kind: "tool", name: block.name, phase: "start" };
+            }
+          } else if (event.type === "content_block_delta") {
+            if (event.delta.type === "text_delta" && event.delta.text) {
+              yield { kind: "text", text: event.delta.text };
+            }
+          } else if (event.type === "content_block_stop") {
+            const open = openBlocks.get(event.index);
+            if (open) {
+              openBlocks.delete(event.index);
+              yield { kind: "tool", name: open.toolName, phase: "end" };
+            }
           }
         }
 

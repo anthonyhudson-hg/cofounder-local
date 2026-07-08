@@ -117,6 +117,54 @@ describe("useConversation", () => {
     expect(result.current.messages).toHaveLength(0);
   });
 
+  it("send(): 'tool' deltas surface as activeTool (start) and clear it (end), and the turn ending always clears it", async () => {
+    let resolveSend: (value: unknown) => void;
+    let capturedOnDelta: ((channel: string, data: unknown) => void) | undefined;
+    mockedCommandStreaming.mockImplementation(
+      (_type, _payload, _companyId, onDelta) =>
+        new Promise((resolve) => {
+          capturedOnDelta = onDelta;
+          resolveSend = resolve;
+        }),
+    );
+
+    const { result } = renderHook(() => useConversation("conv-1", "co-1", employee));
+    await waitFor(() => expect(mockedQuery).toHaveBeenCalled());
+
+    act(() => {
+      void result.current.send("remember this", "claude-sonnet-5", "medium");
+    });
+    const assistantId = result.current.messages[1].id;
+
+    expect(result.current.activeTool).toBeNull();
+    act(() => {
+      capturedOnDelta!("tool", { messageId: "server-assistant-id", name: "mcp__cofounder__memory_write", phase: "start" });
+    });
+    expect(result.current.activeTool).toEqual({ messageId: assistantId, name: "mcp__cofounder__memory_write" });
+
+    act(() => {
+      capturedOnDelta!("tool", { messageId: "server-assistant-id", name: "mcp__cofounder__memory_write", phase: "end" });
+    });
+    expect(result.current.activeTool).toBeNull();
+
+    // Defensive clear: even if a "start" arrived with no matching "end", the
+    // turn settling must not leave a stale indicator stuck on screen.
+    act(() => {
+      capturedOnDelta!("tool", { messageId: "server-assistant-id", name: "mcp__cofounder__memory_write", phase: "start" });
+    });
+    expect(result.current.activeTool).not.toBeNull();
+
+    mockedQuery.mockClear();
+    mockEmptyQueries();
+    await act(async () => {
+      resolveSend!({ userMessageId: "u1", assistantMessageId: "a1", sessionId: "s1", success: true, reaction: null });
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(result.current.sending).toBe(false));
+    expect(result.current.activeTool).toBeNull();
+  });
+
   it("send(): a graceful failure (result.success = false) marks the assistant message errored", async () => {
     mockedCommandStreaming.mockResolvedValue({
       userMessageId: "u1",

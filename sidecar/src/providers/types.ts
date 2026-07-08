@@ -63,23 +63,32 @@ export interface TurnResult {
 }
 
 /**
- * A backend that can run one agent turn. Implementations yield assistant text
- * chunks as they stream, and return terminal metadata (session id, usage, cost)
- * once the turn completes. Callers that want streaming emit each yielded chunk;
- * callers that want the full text accumulate the chunks.
+ * A turn yields two kinds of chunk: incremental text (real token-level
+ * streaming when the provider supports it, not one block at the end) and
+ * tool-activity notices (a model calling e.g. memory_write). Both ride the
+ * same generator so a caller only has to drain one stream, same as before —
+ * `kind` just lets it tell them apart instead of assuming every chunk is text.
+ */
+export type TurnChunk = { kind: "text"; text: string } | { kind: "tool"; name: string; phase: "start" | "end" };
+
+/**
+ * A backend that can run one agent turn. Implementations yield chunks as they
+ * happen and return terminal metadata (session id, usage, cost) once the turn
+ * completes. Callers that want streaming emit each yielded chunk; callers
+ * that want the full text accumulate the "text" chunks.
  */
 export interface AgentProvider {
-  runTurn(opts: RunTurnOptions): AsyncGenerator<string, TurnResult, void>;
+  runTurn(opts: RunTurnOptions): AsyncGenerator<TurnChunk, TurnResult, void>;
 }
 
-/** Drive a runTurn generator to completion, forwarding each text chunk. */
+/** Drive a runTurn generator to completion, forwarding each yielded chunk. */
 export async function drainTurn(
-  gen: AsyncGenerator<string, TurnResult, void>,
-  onText: (text: string) => void,
+  gen: AsyncGenerator<TurnChunk, TurnResult, void>,
+  onChunk: (chunk: TurnChunk) => void,
 ): Promise<TurnResult> {
   let step = await gen.next();
   while (!step.done) {
-    onText(step.value);
+    onChunk(step.value);
     step = await gen.next();
   }
   return step.value;

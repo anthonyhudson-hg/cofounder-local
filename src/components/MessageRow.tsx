@@ -30,6 +30,17 @@ interface Props {
   // comparison even if MessageList recomputes it fresh every render.
   replyAuthorName?: string;
   replySnippet?: string;
+  /** Raw tool name (e.g. "mcp__cofounder__memory_write") while this message is
+   *  actively calling it — see useConversation's "tool" delta channel. */
+  activeToolName?: string;
+}
+
+/** "mcp__cofounder__memory_write" -> "Memory write" — strips the MCP server
+ *  prefix so tool activity reads like a short verb phrase, not an internal id. */
+function friendlyToolName(raw: string): string {
+  const short = raw.startsWith("mcp__") ? raw.split("__").pop() ?? raw : raw;
+  const words = short.replace(/[_.]/g, " ").trim();
+  return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
 function formatTime(iso: string): string {
@@ -66,6 +77,7 @@ function MessageRowImpl({
   onReply,
   replyAuthorName,
   replySnippet,
+  activeToolName,
 }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -94,7 +106,7 @@ function MessageRowImpl({
   for (const emoji of reactions) reactionCounts.set(emoji, (reactionCounts.get(emoji) ?? 0) + 1);
 
   return (
-    <div className="message-row">
+    <div className="message-row" data-message-id={m.id}>
       <Avatar name={displayName} avatar={m.role === "assistant" ? avatar : null} bot={m.role === "assistant"} />
       <div className="message-body">
         <div className="message-meta">
@@ -110,6 +122,12 @@ function MessageRowImpl({
         <div className="message-content">
           <MarkdownContent content={m.content} targets={mentionTargets} onMentionClick={onMentionClick} />
           {m.status === "streaming" && <span className="streaming-cursor" />}
+          {m.status === "streaming" && activeToolName && (
+            <div className="tool-activity">
+              <span className="tool-activity-spinner" />
+              Using {friendlyToolName(activeToolName)}…
+            </div>
+          )}
           {m.status === "error" && <div className="message-error">Error: {m.error_message}</div>}
         </div>
         {usage && <div className="message-usage">{usage}</div>}
