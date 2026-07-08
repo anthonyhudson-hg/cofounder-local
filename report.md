@@ -258,7 +258,10 @@ Related, same file:
 
 **Fix:** add an optional timeout/`AbortSignal` to `RunTurnOptions`, wire into both providers.
 
-### 3.7 — Test coverage gap: the two most fragile files have zero tests — HIGH
+### 3.7 — Test coverage gap: the two most fragile files have zero tests — HIGH — ⚠️ PARTIAL (see Part 8)
+
+**Fix applied:** added a `dispatch()`/`validateInbound()` test closing the wire-protocol-boundary half of this gap. **Not done:** mocked-SDK tests for `ClaudeProvider`/`CodexProvider` — see Part 8's fuller explanation of why this specific piece needs its own test-infrastructure investment rather than a quick addition.
+
 **File:** `sidecar/src/__tests__/runtime.test.ts`
 
 Neither `ClaudeProvider` nor `CodexProvider` is exercised anywhere — the one chat-flow test injects a hand-rolled `fakeProvider` cast `as never` (bypassing the real interface entirely, so it can silently drift from it). This is exactly the code with the most fragile, nontrivial logic in the reviewed set (ESM/CJS dynamic-import interop, per-event-type usage/failure mapping) — and exactly where §3.1's real bug lives, undetected. The wire-protocol boundary (`dispatch.ts`/`runtime/index.ts`) is also never exercised; every test calls domain services directly, bypassing the malformed-JSON and dropped-`id` paths from §3.3 entirely.
@@ -545,3 +548,19 @@ Avatar/color/manager/channel-membership changes apply immediately on click; name
 | LOW/NIT | 28 |
 
 The codebase is functional and the domain modeling (event sourcing, capability grants, effective-dated channel membership) is more thoughtful than most side projects at this stage — but it has the classic MVP shape: every happy path works, and almost nothing that can fail has a failure path. The single highest-leverage fix is §1.1 (timeouts) — it's the root cause behind a large fraction of the "hangs forever" bugs scattered through the hooks layer, and it's a few hours of work in two files (`runtimeClient.ts`, `sidecarRequest.ts`) to fix everywhere at once. The single scariest fix is §2.2 (GitHub connector) — it's a real, unattended exfiltration path gated by a UI dialog nobody will read closely, in an app that hands autonomous agents credentials.
+
+---
+
+## Fix pass status (post-review)
+
+Every numbered finding in this report was worked through end to end: **all 9 Part 0 "fix nothing else" items are done**, along with the large majority of everything else. Status tags (`✅ DONE`, `⚠️ PARTIAL`, `⚠️ NOT DONE`) are inline on each finding above — nothing was silently dropped.
+
+- **~63 findings fully fixed**, **6 partially fixed** (with the remaining gap explained inline), **4 explicitly not attempted** (with the reason explained inline — always "this needs its own dedicated, carefully-scoped effort," never "forgot").
+- Every commit in this pass kept the tree green: root (`tsc --noEmit`, `eslint .`, `vitest run`), sidecar (`tsc`, `node --test`, and now also linted), and `cargo check`/`cargo build` on the Rust side were all run and confirmed clean before moving to the next finding — not just once at the end.
+- Test count grew from 85 → 94 (root) and 7 → 10 (sidecar) as part of fixing specific findings, not as a separate padding pass.
+- The GitHub connector hardening (§2.2) and the manager-cycle fix (§4.1) are the two changes worth double-checking most closely by a human before this ships, given their security/data-integrity stakes — both have dedicated new tests, but neither was exercised against real production data.
+- What's deliberately **not** done, and why, grouped:
+  - **Large, genuinely risky schema/dependency migrations** — retrofitting `ON DELETE CASCADE` onto existing FKs (§4.6, needs SQLite's 12-step table-recreation dance across ~10 tables) and the breaking `kysely` major-version bump for a newly-surfaced SQL-injection advisory (Part 6) — both need their own dedicated, tested effort, not a rushed pass alongside 70+ other changes.
+  - **Real architectural/design decisions, not bugs** — unifying `AppSettingsModal`/`EmployeeSettingsPanel`'s dual auto-save/explicit-save models (§5.8), migrating domain services onto `repos.forCompany()` (§4.9), a typed `CommandMap`/`QueryMap` (§5.9) — these are product/design calls or large refactors, not defects with an obviously-correct fix.
+  - **Test infrastructure investments** — mocked-SDK tests for `ClaudeProvider`/`CodexProvider` (§3.7/Part 8) and full component-rendering tests (no React Testing Library is set up in this project yet) were judged as needing their own setup work rather than a quick bolt-on.
+  - **Cosmetic-only refactors with no behavior change** — the `EmployeeSettingsPanel` god-component split and `register.ts`'s inline-payload-type-style consistency (Part 6) were left alone specifically because this pass already touched those files for real fixes; layering a pure refactor on top would only have made the diff harder to review for no correctness benefit.
