@@ -36,6 +36,12 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "externalBin": ["binaries/sidecar-node"],
+    "resources": {
+      "../sidecar/dist/": "sidecar/dist/",
+      "../sidecar/node_modules/": "sidecar/node_modules/",
+      "../sidecar/package.json": "sidecar/package.json"
+    }
   }
 }

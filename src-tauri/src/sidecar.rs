@@ -52,8 +52,25 @@ pub fn kill_children(app: &AppHandle) {
     app.state::<RuntimeState>().kill_now();
 }
 
+/// Windows-only quirk: `resource_dir()`/`app_config_dir()`/`current_exe()` can
+/// return an extended-length "verbatim" path (`\\?\C:\...`). Node's own module
+/// loader (`resolveMainPath`/`realpathSync`) does not handle that prefix
+/// correctly — it misparses it and throws `EISDIR: illegal operation on a
+/// directory, lstat 'C:'` when asked to run a script under one, even though the
+/// path is otherwise completely valid and normal file I/O (e.g. better-sqlite3
+/// opening the DB) handles it fine. Strip the prefix before handing any path to
+/// the Node process, either as its script argument or via env var, since
+/// there's no reason any of them need the verbatim form here.
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    match path.to_str() {
+        Some(s) if s.starts_with(r"\\?\") => PathBuf::from(&s[4..]),
+        _ => path,
+    }
+}
+
 fn resolve_runtime_script(app: &AppHandle) -> Result<PathBuf, String> {
     if let Ok(resource_dir) = app.path().resource_dir() {
+        let resource_dir = strip_verbatim_prefix(resource_dir);
         let bundled = resource_dir
             .join("sidecar")
             .join("dist")
@@ -84,6 +101,7 @@ fn resolve_db_path(app: &AppHandle) -> Result<PathBuf, String> {
         .path()
         .app_config_dir()
         .map_err(|e| format!("no app config dir: {e}"))?;
+    let dir = strip_verbatim_prefix(dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir app config dir: {e}"))?;
     Ok(dir.join("cofounder.db"))
 }
@@ -99,6 +117,7 @@ fn resolve_db_path(app: &AppHandle) -> Result<PathBuf, String> {
 /// a dev machine's Node a requirement; a bundled release build carries its own.
 fn resolve_node_binary(_app: &AppHandle) -> Result<PathBuf, String> {
     if let Ok(exe) = std::env::current_exe() {
+        let exe = strip_verbatim_prefix(exe);
         if let Some(dir) = exe.parent() {
             let bundled = dir.join("sidecar-node.exe");
             if bundled.exists() {
