@@ -6,9 +6,24 @@ import { buildIdentityBlock, composeSystemPrompt } from "../../runtime/promptBui
 import { formatReactionNoticesForPrompt } from "../../runtime/reactionFormatting";
 import { findMentions, type MentionTarget } from "../../runtime/mentions";
 import { modelProvider } from "../../runtime/models";
-import { getProvider, drainTurn, type AgentProvider, type Effort } from "../../providers";
+import { getProvider, drainTurn, TurnCancelledError, type AgentProvider, type Effort, type TurnChunk, type TurnResult } from "../../providers";
 import { resolveManagerName, employeeDisplayName, listChannelMembers, listResponsibilities, getAgentProfile } from "../employees/service";
 import { getUserProfile } from "../settings/service";
+import { registerTurn, unregisterTurn } from "../../runtime/turnRegistry";
+
+/**
+ * A stored session id can go stale outside this app's control (the SDK's own
+ * local session store cleared, state restored on a different machine, a
+ * corrupted local cache). Once that happens, every future turn on this
+ * conversation would resume with the same dead id and repeat the exact same
+ * failure forever — no self-heal path existed before this. Detects Claude's
+ * specific "resume target doesn't exist" error text so callers can retry once
+ * with a fresh session instead of erroring on every message indefinitely.
+ */
+function isStaleSessionError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /no conversation found with session/i.test(message);
+}
 
 /** Lists a company's conversations (scoped). */
 export async function listConversations(ctx: RuntimeContext, companyId: string) {
@@ -499,28 +514,46 @@ export async function sendMessage(
   let errorMessage: string | undefined;
   let sessionId: string | null = resume;
   let reaction: { messageId: string; emoji: string } | null = null;
+  let full = "";
+
+  // Registered so a later, separate command:message.cancel call can reach in and
+  // abort this specific in-flight turn (see runtime/turnRegistry.ts) — there's no
+  // other way for one IPC call to signal a still-running one.
+  const abortController = new AbortController();
+  registerTurn(assistantMessageId, abortController);
 
   try {
     const provider = providerOverride ?? getProvider(providerName);
-    let full = "";
-    const result = await drainTurn(
-      provider.runTurn({
-        model,
-        effort,
-        systemPrompt,
-        prompt: promptWithNotices,
-        resumeSessionId: resume,
-        memoryWriteTool: { ctx, companyId: input.companyId, employeeId: employee.id, correlationId: input.correlationId ?? null },
-      }),
-      (chunk) => {
-        if (chunk.kind === "text") {
-          full += chunk.text;
-          sink.delta("text", { messageId: assistantMessageId, text: chunk.text });
-        } else {
-          sink.delta("tool", { messageId: assistantMessageId, name: chunk.name, phase: chunk.phase });
-        }
-      },
-    );
+
+    const onChunk = (chunk: TurnChunk) => {
+      if (chunk.kind === "text") {
+        full += chunk.text;
+        sink.delta("text", { messageId: assistantMessageId, text: chunk.text });
+      } else {
+        sink.delta("tool", { messageId: assistantMessageId, name: chunk.name, phase: chunk.phase });
+      }
+    };
+    const runTurnOpts = (resumeSessionId: string | null) => ({
+      model,
+      effort,
+      systemPrompt,
+      prompt: promptWithNotices,
+      resumeSessionId,
+      memoryWriteTool: { ctx, companyId: input.companyId, employeeId: employee.id, correlationId: input.correlationId ?? null },
+      abortSignal: abortController.signal,
+    });
+
+    let result: TurnResult;
+    try {
+      result = await drainTurn(provider.runTurn(runTurnOpts(resume)), onChunk);
+    } catch (err) {
+      if (resume && isStaleSessionError(err)) {
+        full = ""; // defensive — this failure surfaces before any text streams, but don't assume it
+        result = await drainTurn(provider.runTurn(runTurnOpts(null)), onChunk);
+      } else {
+        throw err;
+      }
+    }
 
     const reactMatch = full.match(/\n*\[\[react:(\S+)\]\]\s*$/);
     const finalContent = reactMatch ? full.slice(0, reactMatch.index).trimEnd() : full;
@@ -564,12 +597,36 @@ export async function sendMessage(
       reaction = { messageId: userMessageId, emoji: reactMatch[1] };
     }
   } catch (err) {
-    success = false;
-    errorMessage = err instanceof Error ? err.message : String(err);
-    await mutate(ctx, async (trx, emit) => {
-      await trx.updateTable("messages").set({ status: "error", error_message: errorMessage }).where("id", "=", assistantMessageId).execute();
-      await emit({ companyId: input.companyId, type: "message.errored", subjectId: assistantMessageId, actor: { kind: "system" }, payload: {} });
-    });
+    if (err instanceof TurnCancelledError) {
+      // A user-initiated stop isn't a failure — keep whatever text already
+      // streamed and mark it complete, matching how stopping a response works
+      // in Claude's own web UI (the partial reply stays, it isn't an error).
+      success = true;
+      errorMessage = undefined;
+      await mutate(ctx, async (trx, emit) => {
+        await trx
+          .updateTable("messages")
+          .set({ content: full, status: "complete", error_message: null })
+          .where("id", "=", assistantMessageId)
+          .execute();
+        await emit({
+          companyId: input.companyId,
+          type: "message.completed",
+          subjectId: assistantMessageId,
+          actor: { kind: "user" },
+          payload: { conversationId: input.conversationId, ok: true, cancelled: true },
+        });
+      });
+    } else {
+      success = false;
+      errorMessage = err instanceof Error ? err.message : String(err);
+      await mutate(ctx, async (trx, emit) => {
+        await trx.updateTable("messages").set({ status: "error", error_message: errorMessage }).where("id", "=", assistantMessageId).execute();
+        await emit({ companyId: input.companyId, type: "message.errored", subjectId: assistantMessageId, actor: { kind: "system" }, payload: {} });
+      });
+    }
+  } finally {
+    unregisterTurn(assistantMessageId);
   }
 
   return { userMessageId, assistantMessageId, sessionId, success, errorMessage, reaction };
@@ -835,22 +892,34 @@ export async function sendChannelMessage(
       try {
         const provider = responderProviderOverride ?? getProvider(providerName);
         let fullText = "";
-        const result = await drainTurn(
-          provider.runTurn({
-            model: member.default_model,
-            effort: member.default_effort as Effort,
-            systemPrompt,
-            prompt: promptWithNotices,
-            resumeSessionId,
-            memoryWriteTool: { ctx, companyId: input.companyId, employeeId: member.id, correlationId: input.correlationId ?? null },
-          }),
-          (chunk) => {
-            // Channel replies never streamed to the UI before or after the full
-            // cutover (no sink is threaded into sendChannelMessage) — tool-activity
-            // chunks have nowhere to go either, so only text is accumulated here.
-            if (chunk.kind === "text") fullText += chunk.text;
-          },
-        );
+        const onChunk = (chunk: TurnChunk) => {
+          // Channel replies never streamed to the UI before or after the full
+          // cutover (no sink is threaded into sendChannelMessage) — tool-activity
+          // chunks have nowhere to go either, so only text is accumulated here.
+          if (chunk.kind === "text") fullText += chunk.text;
+        };
+        const runTurnOpts = (resume: string | null) => ({
+          model: member.default_model,
+          effort: member.default_effort as Effort,
+          systemPrompt,
+          prompt: promptWithNotices,
+          resumeSessionId: resume,
+          memoryWriteTool: { ctx, companyId: input.companyId, employeeId: member.id, correlationId: input.correlationId ?? null },
+        });
+
+        let result: TurnResult;
+        try {
+          result = await drainTurn(provider.runTurn(runTurnOpts(resumeSessionId)), onChunk);
+        } catch (err) {
+          // Same self-heal as the DM path — a stale stored session must not
+          // permanently break this employee's channel replies either.
+          if (resumeSessionId && isStaleSessionError(err)) {
+            fullText = "";
+            result = await drainTurn(provider.runTurn(runTurnOpts(null)), onChunk);
+          } else {
+            throw err;
+          }
+        }
 
         const { control, text } = parseChannelControl(fullText);
 

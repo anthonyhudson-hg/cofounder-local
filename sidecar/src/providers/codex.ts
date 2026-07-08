@@ -7,7 +7,7 @@ import type {
   ModelReasoningEffort,
   ThreadOptions,
 } from "@openai/codex-sdk";
-import { AgentProvider, Effort, RunTurnOptions, TurnChunk, TurnResult, UsagePayload, ZERO_USAGE } from "./types";
+import { AgentProvider, Effort, RunTurnOptions, TurnCancelledError, TurnChunk, TurnResult, UsagePayload, ZERO_USAGE } from "./types";
 
 /*
  * OpenAI Codex provider. Structural analog to the Claude Agent SDK: the
@@ -122,6 +122,13 @@ export class CodexProvider implements AgentProvider {
 
       const abortController = new AbortController();
       const timer = opts.timeoutMs ? setTimeout(() => abortController.abort(), opts.timeoutMs) : null;
+      // Bridge an externally-supplied signal (a user pressing "Stop") into the
+      // controller runStreamed() actually uses — see claude.ts's identical guard.
+      const onExternalAbort = () => abortController.abort();
+      if (opts.abortSignal) {
+        if (opts.abortSignal.aborted) abortController.abort();
+        else opts.abortSignal.addEventListener("abort", onExternalAbort);
+      }
 
       let sessionId: string | null = opts.resumeSessionId ?? null;
       let usage: UsagePayload = { ...ZERO_USAGE };
@@ -175,6 +182,7 @@ export class CodexProvider implements AgentProvider {
           if (failure || completed) break;
         }
       } catch (err) {
+        if (opts.abortSignal?.aborted) throw new TurnCancelledError();
         if (abortController.signal.aborted) {
           throw new Error(`Codex turn timed out after ${opts.timeoutMs}ms`, { cause: err });
         }
@@ -183,6 +191,7 @@ export class CodexProvider implements AgentProvider {
         throw new Error(code ? `${message} (${code})` : message, { cause: err });
       } finally {
         if (timer) clearTimeout(timer);
+        opts.abortSignal?.removeEventListener("abort", onExternalAbort);
       }
 
       if (failure) throw new Error(failure);

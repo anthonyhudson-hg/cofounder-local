@@ -1,5 +1,5 @@
 import type { query } from "@anthropic-ai/claude-agent-sdk";
-import { AgentProvider, RunTurnOptions, TurnChunk, TurnResult, UsagePayload, ZERO_USAGE } from "./types";
+import { AgentProvider, RunTurnOptions, TurnCancelledError, TurnChunk, TurnResult, UsagePayload, ZERO_USAGE } from "./types";
 import { buildMemoryWriteToolDef, MEMORY_WRITE_ALLOWED_TOOL, MEMORY_WRITE_MCP_SERVER_NAME } from "./claudeMemoryTool";
 
 /**
@@ -53,6 +53,15 @@ export class ClaudeProvider implements AgentProvider {
 
     const abortController = new AbortController();
     const timer = opts.timeoutMs ? setTimeout(() => abortController.abort(), opts.timeoutMs) : null;
+    // Bridge an externally-supplied signal (a user pressing "Stop") into the
+    // internal controller the SDK call actually uses — query() only accepts
+    // one AbortController, so timeout and user-cancel share it; which one
+    // fired is disambiguated below via opts.abortSignal.aborted specifically.
+    const onExternalAbort = () => abortController.abort();
+    if (opts.abortSignal) {
+      if (opts.abortSignal.aborted) abortController.abort();
+      else opts.abortSignal.addEventListener("abort", onExternalAbort);
+    }
 
     // Only wire the memory-write tool in (and thus only allow it) when the
     // caller opted in — turns without a memoryWriteTool (e.g. the internal
@@ -129,11 +138,17 @@ export class ClaudeProvider implements AgentProvider {
           }
         }
       }
+    } catch (err) {
+      if (opts.abortSignal?.aborted) throw new TurnCancelledError();
+      if (abortController.signal.aborted) throw new Error(`Claude turn timed out after ${opts.timeoutMs}ms`, { cause: err });
+      throw err;
     } finally {
       if (timer) clearTimeout(timer);
+      opts.abortSignal?.removeEventListener("abort", onExternalAbort);
     }
 
     if (!resultObserved) {
+      if (opts.abortSignal?.aborted) throw new TurnCancelledError();
       if (abortController.signal.aborted) {
         throw new Error(`Claude turn timed out after ${opts.timeoutMs}ms`);
       }

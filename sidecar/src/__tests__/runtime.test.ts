@@ -503,6 +503,95 @@ test("sendMessage (DM): a provider throwing mid-turn is caught and persisted as 
   await ctx.db.destroy();
 });
 
+test("sendMessage (DM): a stale/invalid resume session self-heals — retries once fresh instead of failing every future message forever", async () => {
+  const { sendMessage } = await import("../domains/conversations/service");
+  const ctx = freshCtx();
+  const { id: companyId } = await createCompany(ctx, { name: "A" }, { kind: "user" });
+  const cos = await ctx.db
+    .selectFrom("employees")
+    .where("company_id", "=", companyId)
+    .select(["id", "conversation_id"])
+    .executeTakeFirstOrThrow();
+
+  // Seed a stored session id, as if left behind by a prior successful turn
+  // whose session has since gone stale (SDK-side store cleared, etc).
+  await ctx.db
+    .updateTable("conversations")
+    .set({ session_id: "dead-session-id", session_provider: "claude" })
+    .where("id", "=", cos.conversation_id)
+    .execute();
+
+  let calls = 0;
+  const provider = {
+    async *runTurn(opts: { resumeSessionId?: string | null }) {
+      calls++;
+      if (opts.resumeSessionId) {
+        throw new Error("Claude Code returned an error result: No conversation found with session ID: dead-session-id");
+      }
+      yield { kind: "text", text: "fresh reply" };
+      return {
+        sessionId: "new-session-id",
+        success: true,
+        usage: { inputTokens: 1, outputTokens: 1, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+        totalCostUsd: 0,
+      };
+    },
+  };
+  const sink = { delta: () => {} };
+
+  const res = await sendMessage(ctx, { companyId, conversationId: cos.conversation_id, text: "hi" }, sink, provider as never);
+
+  assert.equal(calls, 2, "first attempt (resume) fails, second (fresh) succeeds");
+  assert.equal(res.success, true);
+  assert.equal(res.sessionId, "new-session-id");
+
+  const assistantMsg = await ctx.db.selectFrom("messages").where("id", "=", res.assistantMessageId).selectAll().executeTakeFirstOrThrow();
+  assert.equal(assistantMsg.status, "complete");
+  assert.equal(assistantMsg.content, "fresh reply");
+
+  const conv = await ctx.db.selectFrom("conversations").where("id", "=", cos.conversation_id).select("session_id").executeTakeFirstOrThrow();
+  assert.equal(conv.session_id, "new-session-id", "the dead session id is overwritten, not repeated forever");
+
+  await ctx.db.destroy();
+});
+
+test("sendMessage (DM): cancelling (TurnCancelledError) keeps whatever text already streamed as a completed message, not an error", async () => {
+  const { sendMessage } = await import("../domains/conversations/service");
+  const { TurnCancelledError } = await import("../providers");
+  const { cancelTurn } = await import("../runtime/turnRegistry");
+  const ctx = freshCtx();
+  const { id: companyId } = await createCompany(ctx, { name: "A" }, { kind: "user" });
+  const cos = await ctx.db
+    .selectFrom("employees")
+    .where("company_id", "=", companyId)
+    .select(["id", "conversation_id"])
+    .executeTakeFirstOrThrow();
+
+  const provider = {
+    async *runTurn() {
+      yield { kind: "text", text: "Partial answer, " };
+      throw new TurnCancelledError();
+    },
+  };
+  const sink = { delta: () => {} };
+
+  const res = await sendMessage(ctx, { companyId, conversationId: cos.conversation_id, text: "hi" }, sink, provider as never);
+
+  assert.equal(res.success, true, "a user-initiated cancel isn't a failure");
+  assert.equal(res.errorMessage, undefined);
+
+  const assistantMsg = await ctx.db.selectFrom("messages").where("id", "=", res.assistantMessageId).selectAll().executeTakeFirstOrThrow();
+  assert.equal(assistantMsg.status, "complete");
+  assert.equal(assistantMsg.content, "Partial answer, ");
+  assert.equal(assistantMsg.error_message, null);
+
+  // The turn already finished (unregistered in the finally block) by the time
+  // this fires — cancelTurn must report that cleanly, not throw or false-positive.
+  assert.equal(cancelTurn(res.assistantMessageId), false);
+
+  await ctx.db.destroy();
+});
+
 test("sendChannelMessage (full cutover — new server-side orchestration, no client equivalent existed): @mention bypasses relevance gate and posts a control-block-parsed reply; a non-mentioned member is relevance-gated out", async () => {
   const { sendChannelMessage } = await import("../domains/conversations/service");
   const { createEmployee, toggleMembership } = await import("../domains/employees/service");

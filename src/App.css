@@ -1450,6 +1450,13 @@ body {
   margin-top: 4px;
 }
 
+.message-queued {
+  display: inline-block;
+  color: #9a9a9a;
+  font-size: 0.85rem;
+  font-style: italic;
+}
+
 .reaction-badges {
   display: flex;
   gap: 6px;
@@ -1887,6 +1894,14 @@ body {
   background: #e2e0e2;
   color: #a8a8a8;
   cursor: not-allowed;
+}
+
+.stop-button {
+  background: #2a2530;
+}
+
+.stop-button:hover {
+  background: #17141c;
 }
 
 .pill-select {

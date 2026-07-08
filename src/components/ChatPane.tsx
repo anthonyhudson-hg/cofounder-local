@@ -184,7 +184,7 @@ function DmChatPane({
   onOpenSidebar,
   onActivity,
 }: Props) {
-  const { messages, replyCounts, reactions, toggleReaction, send, sending, activeTool } = useConversation(
+  const { messages, replyCounts, reactions, toggleReaction, send, cancel, sending, activeTool } = useConversation(
     conversation.id,
     companyId,
     employee,
@@ -264,7 +264,6 @@ function DmChatPane({
 
         <Composer
           placeholder={`Message ${conversation.name}`}
-          disabled={!!employee && sending}
           onSend={(text) => {
             send(
               text,
@@ -282,6 +281,8 @@ function DmChatPane({
           mentionTargets={mentionTargets}
           replyPreview={replyPreview}
           onCancelReply={() => setReplyingTo(null)}
+          sending={sending}
+          onCancel={cancel}
         />
       </div>
 
@@ -297,6 +298,7 @@ function DmChatPane({
           onMentionClick={handleMentionClick}
           onSend={(text, m, e, replyTo) => send(text, m, e, replyTo)}
           sending={sending}
+          onCancel={cancel}
           showModelEffort={!!employee}
           model={model}
           effort={effort}

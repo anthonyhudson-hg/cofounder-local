@@ -165,6 +165,78 @@ describe("useConversation", () => {
     expect(result.current.activeTool).toBeNull();
   });
 
+  it("send(): a second send() while one is in flight queues (appears optimistically as 'pending') instead of racing, and fires automatically once the first finishes — composer must never lock or drop a message", async () => {
+    const resolvers: Array<(value: unknown) => void> = [];
+    mockedCommandStreaming.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+
+    const { result } = renderHook(() => useConversation("conv-1", "co-1", employee));
+    await waitFor(() => expect(mockedQuery).toHaveBeenCalled());
+
+    act(() => {
+      result.current.send("first", "claude-sonnet-5", "medium");
+    });
+    expect(result.current.sending).toBe(true);
+    expect(mockedCommandStreaming).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      result.current.send("second", "claude-sonnet-5", "medium");
+    });
+    // Queued, not sent — commandStreaming is NOT called a second time yet, but
+    // the message appears immediately (optimistic), the assistant placeholder
+    // is "pending" (nothing has started running for it).
+    expect(mockedCommandStreaming).toHaveBeenCalledTimes(1);
+    expect(result.current.messages).toHaveLength(4);
+    expect(result.current.messages[2]).toMatchObject({ role: "user", content: "second" });
+    expect(result.current.messages[3]).toMatchObject({ role: "assistant", status: "pending" });
+
+    mockedQuery.mockClear();
+    mockEmptyQueries();
+
+    // Resolving the first turn should automatically fire the queued second one.
+    await act(async () => {
+      resolvers[0]({ userMessageId: "u1", assistantMessageId: "a1", sessionId: null, success: true, reaction: null });
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(mockedCommandStreaming).toHaveBeenCalledTimes(2));
+    expect(mockedCommandStreaming.mock.calls[1][1]).toMatchObject({ text: "second" });
+    // sending stays true across the handoff between queued turns — it must not
+    // flicker false-then-true, which would make the composer briefly re-lock/
+    // unlock between two sends that were always meant to run back-to-back.
+    expect(result.current.sending).toBe(true);
+
+    mockedQuery.mockClear();
+    mockEmptyQueries();
+    await act(async () => {
+      resolvers[1]({ userMessageId: "u2", assistantMessageId: "a2", sessionId: null, success: true, reaction: null });
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(result.current.sending).toBe(false));
+  });
+
+  it("cancel(): sends command:message.cancel for whichever message is currently in flight, and is a clean no-op with nothing in flight", () => {
+    const { result } = renderHook(() => useConversation("conv-1", "co-1", employee));
+
+    // Nothing in flight yet — must not call the backend at all.
+    result.current.cancel();
+    expect(mockedCommand).not.toHaveBeenCalled();
+
+    mockedCommandStreaming.mockImplementation(() => new Promise(() => {})); // never resolves, turn stays in flight
+    act(() => {
+      result.current.send("hi", "claude-sonnet-5", "medium");
+    });
+    const inFlightAssistantId = result.current.messages[1].id;
+
+    result.current.cancel();
+    expect(mockedCommand).toHaveBeenCalledWith("message.cancel", { messageId: inFlightAssistantId }, "co-1");
+  });
+
   it("send(): a graceful failure (result.success = false) marks the assistant message errored", async () => {
     mockedCommandStreaming.mockResolvedValue({
       userMessageId: "u1",

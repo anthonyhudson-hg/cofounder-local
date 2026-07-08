@@ -4,6 +4,7 @@ import {
   ListNumbers,
   PaperPlaneTilt,
   Quotes,
+  Stop,
   TextB,
   TextItalic,
   TextStrikethrough,
@@ -79,6 +80,12 @@ interface Props {
   mentionTargets?: MentionTarget[];
   replyPreview?: ReplyPreview | null;
   onCancelReply?: () => void;
+  /** A turn is in flight. Unlike `disabled`, this never blocks typing/sending —
+   *  only swaps the send button for a Stop button (see onCancel). Sending while
+   *  already sending queues instead of blocking (matches Claude web). */
+  sending?: boolean;
+  /** Stops the CURRENTLY in-flight turn (not anything queued behind it). */
+  onCancel?: () => void;
 }
 
 export function Composer({
@@ -93,6 +100,8 @@ export function Composer({
   mentionTargets,
   replyPreview,
   onCancelReply,
+  sending,
+  onCancel,
 }: Props) {
   const [mentionQuery, setMentionQuery] = useState<MentionQuery | null>(null);
   const mentionTargetsRef = useRef(mentionTargets);
@@ -311,14 +320,20 @@ export function Composer({
           ) : (
             <span />
           )}
-          <button
-            className="send-button"
-            title="Send"
-            disabled={disabled || !editor || isEmpty}
-            onClick={() => submitRef.current()}
-          >
-            <PaperPlaneTilt weight="fill" />
-          </button>
+          {sending ? (
+            <button className="send-button stop-button" title="Stop" onClick={onCancel}>
+              <Stop weight="fill" />
+            </button>
+          ) : (
+            <button
+              className="send-button"
+              title="Send"
+              disabled={disabled || !editor || isEmpty}
+              onClick={() => submitRef.current()}
+            >
+              <PaperPlaneTilt weight="fill" />
+            </button>
+          )}
         </div>
       </div>
     </div>

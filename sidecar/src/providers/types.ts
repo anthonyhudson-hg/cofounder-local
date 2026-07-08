@@ -44,6 +44,28 @@ export interface RunTurnOptions {
    * `command:tool.invoke`.
    */
   memoryWriteTool?: ToolContext;
+  /**
+   * Lets a caller cancel an in-flight turn from outside (a user pressing
+   * "Stop" — see runtime/turnRegistry.ts). Distinct from `timeoutMs`: both
+   * ultimately abort the same underlying subprocess/request, but the two are
+   * reported differently (a cancellation isn't a failure — see
+   * TurnCancelledError below).
+   */
+  abortSignal?: AbortSignal;
+}
+
+/**
+ * Thrown by a provider when a turn was stopped via `abortSignal`, as opposed
+ * to timing out or genuinely failing. Callers (conversations/service.ts)
+ * check for this specifically to persist whatever text already streamed as a
+ * normal completed message instead of an error bubble — matching how
+ * stopping a response works in Claude's own web UI.
+ */
+export class TurnCancelledError extends Error {
+  constructor() {
+    super("Cancelled by user");
+    this.name = "TurnCancelledError";
+  }
 }
 
 export interface TurnResult {

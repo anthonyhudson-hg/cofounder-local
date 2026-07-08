@@ -128,6 +128,7 @@ function MessageRowImpl({
               Using {friendlyToolName(activeToolName)}…
             </div>
           )}
+          {m.status === "pending" && <span className="message-queued">Queued…</span>}
           {m.status === "error" && <div className="message-error">Error: {m.error_message}</div>}
         </div>
         {usage && <div className="message-usage">{usage}</div>}

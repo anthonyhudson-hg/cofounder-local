@@ -21,6 +21,7 @@ interface Props {
   onMentionClick: (target: MentionTarget) => void;
   onSend: (text: string, model: string, effort: Effort, replyTo: ReplyTarget) => void;
   sending: boolean;
+  onCancel?: () => void;
   showModelEffort: boolean;
   model: string;
   effort: Effort;
@@ -42,6 +43,7 @@ export function ThreadPanel({
   onMentionClick,
   onSend,
   sending,
+  onCancel,
   showModelEffort,
   model,
   effort,
@@ -99,13 +101,14 @@ export function ThreadPanel({
       </div>
       <Composer
         placeholder="Reply in thread…"
-        disabled={sending}
         onSend={(text) => onSend(text, model, effort, { messageId: threadRootId, threadRootId })}
         showModelEffort={showModelEffort}
         model={model}
         effort={effort}
         onModelChange={onModelChange}
         onEffortChange={onEffortChange}
+        sending={sending}
+        onCancel={onCancel}
       />
     </aside>
   );

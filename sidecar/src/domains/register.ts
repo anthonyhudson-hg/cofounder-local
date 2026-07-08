@@ -16,6 +16,7 @@ import { listGrants, grantCapability, revokeCapability } from "../tools/capabili
 import type { Effect } from "../tools/types";
 import { registerMemoryTools } from "../tools/builtin/memory";
 import { registerGithubConnector } from "../connectors/github";
+import { cancelTurn } from "../runtime/turnRegistry";
 import {
   listConversations,
   listMessages,
@@ -370,6 +371,14 @@ register("command:message.send", async (ctx, inbound, sink) => {
     },
     sink,
   );
+});
+
+register("command:message.cancel", async (_ctx, inbound) => {
+  const { messageId } = p<{ messageId: string }>(inbound);
+  // No-op (not an error) if the turn already finished — a client can race a
+  // Stop click against the turn's own completion, and both outcomes look the
+  // same to the user (the message stops streaming).
+  return { cancelled: cancelTurn(messageId) };
 });
 
 register("command:message.sendChannel", async (ctx, inbound) => {
