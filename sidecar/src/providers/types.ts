@@ -22,6 +22,14 @@ export interface RunTurnOptions {
   systemPrompt: string;
   prompt: string;
   resumeSessionId?: string | null;
+  /**
+   * Optional: abort the turn if it hasn't produced a terminal result within this many
+   * milliseconds. Neither provider previously had any timeout or cancellation
+   * mechanism — a hung subprocess (network stall, SDK deadlock) blocked the request
+   * indefinitely with no way for the sidecar or user to cancel it (report §3.6).
+   * Unset by default; opt-in, so no existing caller's behavior changes.
+   */
+  timeoutMs?: number;
 }
 
 export interface TurnResult {

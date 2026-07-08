@@ -14,7 +14,7 @@ Severity key: **CRITICAL** (data loss / total feature death) · **HIGH** (real, 
 4. [x] **DONE** — **CSP is fully disabled** (`"csp": null`) in an app that renders LLM-generated (and thus prompt-injectable) markdown. (§2.3)
 5. [x] **DONE** — **Manager-cycle validation is cosmetic.** The frontend blocks direct-report cycles only; the backend validates nothing. A 2+ hop cycle (A→C→B→A) is fully achievable and makes employees vanish from the org chart with no error. (§4.1)
 6. **The sidecar/runtime child processes have no crash detection, no restart, and can be orphaned on app exit.** One crash = silently dead AI chat for the rest of the session, surfaced only as a raw broken-pipe error. (§4.2)
-7. **Codex's "no tools" sandboxing claim is false**, and `CodexProvider.runTurn` unconditionally reports `success: true` even when nothing observably succeeded. (§4.3, §4.4)
+7. [x] **DONE** — **Codex's "no tools" sandboxing claim is false**, and `CodexProvider.runTurn` unconditionally reports `success: true` even when nothing observably succeeded. (§2.5, §3.1 — corrected citation; originally mislabeled §4.3/§4.4 in this report, which are unrelated onboarding findings)
 8. [x] **DONE** — **`MessageList` re-renders every message row on every streamed token.** No memoization anywhere in the hot path. (§6.1)
 9. [x] **DONE** — **Six-plus UI actions (create/clone/delete company, create channel/group, hire, onboarding generate/finish) swallow errors silently** — `try { } finally { setBusy(false) }` with no `catch`, anywhere. (§1.2)
 
@@ -159,7 +159,10 @@ Today this is mostly "self-XSS via naming your own channel" in a single-user app
 
 **Fix:** (a) escape markdown control characters in `raw` before interpolating, or better, do mention substitution as a remark/AST transform instead of pre-parse string surgery; (b) restrict channel/employee names to a safe charset at creation time (`Sidebar.tsx`); (c) allowlist `openUrl` to `http:`/`https:`/`mailto:` schemes only.
 
-### 2.5 — Codex's "no tools" sandboxing claim doesn't hold — HIGH
+### 2.5 — Codex's "no tools" sandboxing claim doesn't hold — HIGH — ✅ DONE
+
+**Fix applied:** each turn now gets its own `fs.mkdtempSync`-created temp directory (cleaned up in a `finally`) instead of the shared `os.tmpdir()` root, and the misleading comment was corrected to describe what `sandboxMode`/`approvalPolicy` actually do versus Claude's genuine `allowedTools: []`.
+
 **File:** `sidecar/src/providers/codex.ts:82-91`
 
 The comment states Codex agents run "purely for chat (no tools)" via `sandboxMode: "read-only"` + `approvalPolicy: "never"`. Checked against `@openai/codex-sdk`'s actual `ThreadOptions` type: there is no option to disable the model's built-in exec/file/patch tools — `sandboxMode`/`approvalPolicy` only constrain what those tools may *do* (read-only fs, no interactive approval), unlike `ClaudeProvider`'s `allowedTools: []` (claude.ts:23), which genuinely removes tool access. A Codex turn can still autonomously invoke shell/read tools, scoped read-only to the **shared, system-wide `os.tmpdir()`** — not an isolated per-turn directory — so a read-only `ls`/`cat` could enumerate/read whatever other applications leave in the OS temp dir.
@@ -180,14 +183,20 @@ The comment states Codex agents run "purely for chat (no tools)" via `sandboxMod
 
 ## Part 3 — Sidecar Runtime, Providers, Dispatch — Correctness & Reliability
 
-### 3.1 — `CodexProvider.runTurn` reports `success: true` unconditionally — HIGH
+### 3.1 — `CodexProvider.runTurn` reports `success: true` unconditionally — HIGH — ✅ DONE
+
+**Fix applied:** added a `completed` flag set only inside the `turn.completed` case; if the event stream ends without either `completed` or a captured `failure`, the turn now throws explicitly instead of silently returning `success:true` with zero usage.
+
 **File:** `sidecar/src/providers/codex.ts:141`
 
 Unlike `ClaudeProvider` (derives `success` from an explicit `subtype === "success"` signal), Codex's success is never actually confirmed — it defaults `true` unless an exception was thrown or a `turn.failed`/`error` event set `failure`. If the SDK's event generator completes cleanly without ever emitting a terminal event (version skew between `@openai/codex-sdk` and the installed CLI, a stream-ending edge case the SDK doesn't surface as an error), the caller gets `success: true` with zero usage and whatever partial text happened to stream — indistinguishable from a real successful empty turn.
 
 **Fix:** track a boolean set *only* inside the `turn.completed` branch (mirror `ClaudeProvider`'s approach) and default to `false`/throw if it was never observed.
 
-### 3.2 — `ClaudeProvider`: silently-truncated stream reports `success:false` with no explanation — MEDIUM
+### 3.2 — `ClaudeProvider`: silently-truncated stream reports `success:false` with no explanation — MEDIUM — ✅ DONE
+
+**Fix applied:** added a `resultObserved` flag; the turn now throws explicitly if the stream ends without ever seeing a `"result"` message, instead of silently returning `success:false` with no explanation.
+
 **File:** `sidecar/src/providers/claude.ts:10-55`
 
 If `query()`'s generator completes without ever yielding a `type:"result"` message (subprocess crash mid-stream), `runTurn` returns `success:false` with no thrown error — the caller emits a normal `done` event with `success:false` instead of taking the `error` path, giving the user zero explanation of what happened, unlike the case where `query()` throws outright.
@@ -224,7 +233,10 @@ Related, same file:
 - **MEDIUM — hardcoded model id** (`"claude-haiku-4-5-20251001"`, line 146) for relevance checks, bypassing the shared `MODELS[]` registry. When this dated snapshot is retired, relevance checks fail silently (swallowed into `respond:false`) and channel employees quietly stop responding with zero visible signal.
 - **LOW — no per-conversation request serialization** (285-308): every inbound line is dispatched fire-and-forget with no queue keyed by conversation id.
 
-### 3.6 — No timeout/cancellation anywhere in the provider contract — MEDIUM
+### 3.6 — No timeout/cancellation anywhere in the provider contract — MEDIUM — ✅ DONE
+
+**Fix applied:** added an optional `RunTurnOptions.timeoutMs`, wired into both providers via `AbortController` — Claude's `query()` (`options.abortController`) and Codex's `thread.runStreamed(input, {signal})`. Unset by default, so no existing caller's behavior changes; a caller that opts in gets a clear "turn timed out after Nms" error instead of an indefinite hang.
+
 **File:** `sidecar/src/providers/types.ts:41-56`
 
 `RunTurnOptions`/`drainTurn` have no timeout or `AbortSignal`. Neither provider implements one — Codex's SDK does support `TurnOptions.signal` but it's never wired through. A hung subprocess (network stall, SDK deadlock) blocks that request indefinitely with no way for the sidecar or user to cancel short of killing the whole process.
@@ -239,12 +251,12 @@ Neither `ClaudeProvider` nor `CodexProvider` is exercised anywhere — the one c
 **Fix:** add a mocked-SDK test suite driving `CodexProvider.runTurn` through `turn.completed`/`turn.failed`/`error`/no-terminal-event sequences, and at least one test that goes through `dispatch()` with a malformed payload.
 
 ### 3.8 — Minor items
-- **`codex.ts` MEDIUM** (30-36): a failed dynamic import is cached forever with no retry — first-call failure (codex CLI not yet on PATH) permanently breaks Codex for the process's life; reset `clientPromise = null` in the catch.
-- **`codex.ts` LOW** (108-131): loop doesn't `break` after a terminal failure event — wasted work, not incorrect.
-- **`codex.ts` LOW** (133-135): original thrown error's `.code` (e.g. `ENOENT`) is discarded in favor of the event-derived message, making "CLI not installed" indistinguishable from "turn failed."
-- **`providers/index.ts` LOW** (12-17): unrecognized provider strings (`"Codex"` with capital C, trailing whitespace) silently route to Claude with no log — a user could believe they're talking to Codex the whole time.
+- **`codex.ts` MEDIUM** (30-36): a failed dynamic import is cached forever with no retry — first-call failure (codex CLI not yet on PATH) permanently breaks Codex for the process's life; reset `clientPromise = null` in the catch. — ✅ DONE.
+- **`codex.ts` LOW** (108-131): loop doesn't `break` after a terminal failure event — wasted work, not incorrect. — ✅ DONE: `if (failure || completed) break;`.
+- **`codex.ts` LOW** (133-135): original thrown error's `.code` (e.g. `ENOENT`) is discarded in favor of the event-derived message, making "CLI not installed" indistinguishable from "turn failed." — ✅ DONE: the code is now appended to the thrown message when present.
+- **`providers/index.ts` LOW** (12-17): unrecognized provider strings (`"Codex"` with capital C, trailing whitespace) silently route to Claude with no log — a user could believe they're talking to Codex the whole time. — ✅ DONE: logs to stderr when `name` is present but unrecognized.
 - **`memory.ts` LOW/MEDIUM** (60-70): `memory.read` has no limit/pagination — unbounded result set fed back into agent context and token cost. — ✅ DONE: added a `limit` input field (default 200, capped at 1000) and a corresponding `.limit()` on the query.
-- **`capability.ts` LOW**: inconsistent `crypto.randomUUID()` global vs. explicit `node:crypto` import used everywhere else; risks depending on WebCrypto global presence in the eventual bundled `.exe`.
+- **`capability.ts` LOW**: inconsistent `crypto.randomUUID()` global vs. explicit `node:crypto` import used everywhere else; risks depending on WebCrypto global presence in the eventual bundled `.exe`. — ✅ DONE: switched to the explicit `node:crypto` import.
 
 ---
 

@@ -13,6 +13,13 @@ export function getProvider(name: string | null | undefined): AgentProvider {
   if (name === "codex") {
     return (codex ??= new CodexProvider());
   }
+  if (name != null && name !== "claude") {
+    // A typo'd/stale provider value (e.g. "Codex" with a capital C, trailing
+    // whitespace) used to silently route to Claude with zero indication — a user
+    // could believe they're talking to Codex the whole time while every response
+    // actually comes from (and is billed/counted against) Claude (report §3.8).
+    process.stderr.write(`[providers] unrecognized provider "${name}", falling back to claude\n`);
+  }
   return claude;
 }
 

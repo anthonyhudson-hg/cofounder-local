@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { RuntimeContext } from "../runtime/context";
 import { effectRank, type Effect } from "./types";
 
@@ -41,7 +42,7 @@ export async function grantCapability(
 ): Promise<void> {
   await ctx.db
     .insertInto("capability_grants")
-    .values({ id: crypto.randomUUID(), company_id: companyId, employee_id: employeeId, scope, max_effect: maxEffect })
+    .values({ id: randomUUID(), company_id: companyId, employee_id: employeeId, scope, max_effect: maxEffect })
     .onConflict((oc) => oc.columns(["employee_id", "scope"]).doUpdateSet({ max_effect: maxEffect }))
     .execute();
 }
