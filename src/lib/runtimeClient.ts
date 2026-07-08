@@ -1,0 +1,131 @@
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import type {
+  CommandEnvelope,
+  EventEnvelope,
+  QueryEnvelope,
+  ResultEnvelope,
+  RuntimeOutbound,
+} from "@shared/protocol";
+
+/**
+ * Typed client for the agent runtime (refactor #2/#7). Sends Commands/Queries
+ * over the Tauri bridge (`send_to_runtime`) and receives Results/Events on the
+ * `runtime://event` stream. The runtime is the sole DB owner.
+ *
+ * We do NOT gate on the runtime's one-time `ready` event — it may fire before the
+ * client registers its listener (a missed-event race that would hang forever).
+ * Instead we retry the send until the runtime process's stdin is available.
+ */
+
+type Pending = { resolve: (data: unknown) => void; reject: (err: Error) => void };
+const pending = new Map<string, Pending>();
+type EventListener = (event: EventEnvelope) => void;
+const eventListeners = new Set<EventListener>();
+type DeltaListener = (channel: string, data: unknown) => void;
+const deltaListeners = new Map<string, DeltaListener>();
+
+let started = false;
+let startPromise: Promise<void> | null = null;
+
+/** Start the runtime event bus once (idempotent; safe to call from anywhere). */
+export function startRuntimeBus(): Promise<void> {
+  if (started) return Promise.resolve();
+  if (startPromise) return startPromise;
+  startPromise = listen<RuntimeOutbound>("runtime://event", (evt) => {
+    const msg = evt.payload;
+    switch (msg.kind) {
+      case "ready":
+        break;
+      case "result": {
+        const p = pending.get(msg.id);
+        if (!p) return;
+        pending.delete(msg.id);
+        if (msg.ok) p.resolve((msg as ResultEnvelope & { ok: true }).data);
+        else p.reject(new Error((msg as ResultEnvelope & { ok: false }).error.message));
+        break;
+      }
+      case "event":
+        for (const l of eventListeners) l(msg);
+        break;
+      case "delta": {
+        const dl = deltaListeners.get(msg.id);
+        if (dl) dl(msg.channel, msg.data);
+        break;
+      }
+    }
+  }).then(() => {
+    started = true;
+  });
+  return startPromise;
+}
+
+export function onRuntimeEvent(listener: EventListener): () => void {
+  eventListeners.add(listener);
+  return () => eventListeners.delete(listener);
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Invoke send_to_runtime, retrying while the runtime process is still coming up
+ * (its stdin not yet registered on the Rust side). ~6s of headroom at boot.
+ */
+async function sendToRuntimeWithRetry(message: unknown): Promise<void> {
+  let lastErr: unknown;
+  for (let i = 0; i < 40; i++) {
+    try {
+      await invoke("send_to_runtime", { message });
+      return;
+    } catch (err) {
+      lastErr = err;
+      const m = err instanceof Error ? err.message : String(err);
+      if (!m.includes("runtime is not running")) throw err instanceof Error ? err : new Error(m);
+      await sleep(150);
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
+function send(envelope: CommandEnvelope | QueryEnvelope): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    pending.set(envelope.id, { resolve, reject });
+    sendToRuntimeWithRetry(envelope).catch((err) => {
+      pending.delete(envelope.id);
+      reject(err instanceof Error ? err : new Error(String(err)));
+    });
+  });
+}
+
+export async function command<T = unknown>(type: string, payload: unknown, companyId: string | null): Promise<T> {
+  await startRuntimeBus();
+  const env: CommandEnvelope = { kind: "command", id: crypto.randomUUID(), type, companyId, payload };
+  return send(env) as Promise<T>;
+}
+
+export async function query<T = unknown>(type: string, payload: unknown, companyId: string | null): Promise<T> {
+  await startRuntimeBus();
+  const env: QueryEnvelope = { kind: "query", id: crypto.randomUUID(), type, companyId, payload };
+  return send(env) as Promise<T>;
+}
+
+/**
+ * A command that streams deltas (e.g. `message.send` yielding assistant text
+ * chunks) before its final result. `onDelta(channel, data)` fires per chunk.
+ */
+export async function commandStreaming<T = unknown>(
+  type: string,
+  payload: unknown,
+  companyId: string | null,
+  onDelta: DeltaListener,
+): Promise<T> {
+  await startRuntimeBus();
+  const id = crypto.randomUUID();
+  deltaListeners.set(id, onDelta);
+  const env: CommandEnvelope = { kind: "command", id, type, companyId, payload };
+  try {
+    return (await send(env)) as T;
+  } finally {
+    deltaListeners.delete(id);
+  }
+}

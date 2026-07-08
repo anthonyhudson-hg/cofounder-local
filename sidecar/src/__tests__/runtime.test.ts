@@ -1,0 +1,229 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import * as os from "node:os";
+import * as path from "node:path";
+import * as fs from "node:fs";
+import { randomUUID } from "node:crypto";
+
+import "../domains/register";
+import { createRuntimeContext, type RuntimeContext } from "../runtime/context";
+import { openSqlite } from "../db/index";
+import { runMigrations } from "../db/migrator";
+import { createCompany } from "../domains/companies/service";
+import { grantCapability } from "../tools/capability";
+import { invokeTool } from "../tools/registry";
+import { resolveApproval } from "../domains/approvals/service";
+import { storeSecret, getSecret } from "../secrets/vault";
+
+function freshCtx(): RuntimeContext {
+  const p = path.join(os.tmpdir(), `cf-test-${randomUUID()}.db`);
+  process.env.COFOUNDER_DB_PATH = p;
+  process.env.COFOUNDER_KEY_DIR = os.tmpdir();
+  return createRuntimeContext();
+}
+
+test("migrator: fresh DB applies all migrations; existing DB baselines", () => {
+  const fresh = openSqlite(path.join(os.tmpdir(), `cf-mig-${randomUUID()}.db`));
+  const r1 = runMigrations(fresh);
+  assert.ok(r1.applied.includes("0001_baseline"));
+  assert.equal(r1.baselined.length, 0);
+  fresh.close();
+
+  const existing = openSqlite(path.join(os.tmpdir(), `cf-mig-${randomUUID()}.db`));
+  existing.exec("CREATE TABLE companies (id TEXT PRIMARY KEY, name TEXT NOT NULL)");
+  const r2 = runMigrations(existing);
+  assert.ok(r2.baselined.includes("0001_baseline"), "existing schema baselined, not re-run");
+  existing.close();
+});
+
+test("LEAKAGE INVARIANT: scoped repos + secrets never cross companies", async () => {
+  const ctx = freshCtx();
+  const a = await createCompany(ctx, { name: "Acme" }, { kind: "user" });
+  const b = await createCompany(ctx, { name: "Globex" }, { kind: "user" });
+
+  const aConvs = await ctx.repos.forCompany(a.id).listConversations();
+  const bConvs = await ctx.repos.forCompany(b.id).listConversations();
+  assert.ok(aConvs.length > 0 && bConvs.length > 0);
+  // No conversation from A appears in B's scoped view and vice-versa.
+  const aIds = new Set(aConvs.map((c) => c.id));
+  assert.ok(bConvs.every((c) => !aIds.has(c.id)), "no cross-company conversation leakage");
+
+  await storeSecret(ctx, a.id, "token", "A-secret");
+  assert.equal(await getSecret(ctx, a.id, "token"), "A-secret");
+  assert.equal(await getSecret(ctx, b.id, "token"), null, "secret not visible cross-company");
+
+  await ctx.db.destroy();
+});
+
+test("event spine: company.create emits company.created with monotonic seq", async () => {
+  const ctx = freshCtx();
+  const events: { type: string; seq: number }[] = [];
+  ctx.bus.subscribe((e) => events.push({ type: e.type, seq: e.seq }));
+  await createCompany(ctx, { name: "A" }, { kind: "user" });
+  await createCompany(ctx, { name: "B" }, { kind: "user" });
+  const created = events.filter((e) => e.type === "company.created");
+  assert.equal(created.length, 2);
+  assert.ok(created[1].seq > created[0].seq, "seq is monotonic");
+  await ctx.db.destroy();
+});
+
+test("capability gate: deny without grant, allow within, approval beyond", async () => {
+  const ctx = freshCtx();
+  const { id: companyId, cosEmployeeId: emp } = await createCompany(ctx, { name: "A" }, { kind: "user" });
+  const tc = { ctx, companyId, employeeId: emp };
+
+  await assert.rejects(() => invokeTool({ ctx, companyId, employeeId: "nobody" }, "memory.read", {}), /denied/);
+
+  await grantCapability(ctx, companyId, emp, "tool:memory", "write-internal");
+  const w = await invokeTool(tc, "memory.write", { key: "k", value: "v" });
+  assert.equal(w.status, "ok");
+
+  await grantCapability(ctx, companyId, emp, "tool:memory", "read"); // downgrade
+  const gated = await invokeTool(tc, "memory.write", { key: "k2", value: "v2" });
+  assert.equal(gated.status, "approval");
+  await ctx.db.destroy();
+});
+
+test("approval round-trip: resolve approved re-runs the gated action", async () => {
+  const ctx = freshCtx();
+  const { id: companyId, cosEmployeeId: emp } = await createCompany(ctx, { name: "A" }, { kind: "user" });
+  await grantCapability(ctx, companyId, emp, "tool:memory", "read");
+  const tc = { ctx, companyId, employeeId: emp };
+  const gated = await invokeTool(tc, "memory.write", { key: "gk", value: "gv" });
+  assert.equal(gated.status, "approval");
+  if (gated.status !== "approval") return;
+  const resolved = await resolveApproval(ctx, gated.approvalId, "approved", "user");
+  const { runToolApproved } = await import("../tools/registry");
+  await runToolApproved({ ctx, companyId, employeeId: resolved.employeeId! }, resolved.action, resolved.detail);
+  const read = await invokeTool(tc, "memory.read", { key: "gk" });
+  assert.equal(read.status, "ok");
+  if (read.status !== "ok") return;
+  assert.equal((read.output as { entries: { value: string }[] }).entries[0].value, "gv");
+  await ctx.db.destroy();
+});
+
+test("chat turn loop (runtime): streams, persists messages, resumes session", async () => {
+  const { sendMessage } = await import("../domains/conversations/service");
+  const ctx = freshCtx();
+  const { id: companyId } = await createCompany(ctx, { name: "A" }, { kind: "user" });
+  const cos = await ctx.db
+    .selectFrom("employees")
+    .where("company_id", "=", companyId)
+    .select(["id", "conversation_id"])
+    .executeTakeFirstOrThrow();
+
+  // fake provider: streams two chunks, returns a session id + usage
+  const fakeProvider = {
+    async *runTurn(opts: { prompt: string }) {
+      yield "Hello, ";
+      yield `you said: ${opts.prompt}`;
+      return {
+        sessionId: "sess-123",
+        success: true,
+        usage: { inputTokens: 10, outputTokens: 5, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+        totalCostUsd: 0.001,
+      };
+    },
+  };
+
+  const deltas: string[] = [];
+  const sink = { delta: (_c: string, d: unknown) => deltas.push((d as { text: string }).text) };
+
+  const events: string[] = [];
+  ctx.bus.subscribe((e) => events.push(e.type));
+
+  const res = await sendMessage(
+    ctx,
+    { companyId, conversationId: cos.conversation_id, text: "ping" },
+    sink,
+    fakeProvider as never,
+  );
+
+  // streamed both chunks
+  assert.deepEqual(deltas, ["Hello, ", "you said: ping"]);
+
+  // persisted user + assistant messages (on top of the seeded CoS greeting)
+  const msgs = await ctx.db
+    .selectFrom("messages")
+    .where("conversation_id", "=", cos.conversation_id)
+    .selectAll()
+    .orderBy("created_at")
+    .execute();
+  assert.equal(msgs.length, 3); // greeting + user + assistant
+  assert.ok(msgs.some((m) => m.id === res.userMessageId));
+  const assistant = msgs.find((m) => m.id === res.assistantMessageId)!;
+  assert.equal(assistant.content, "Hello, you said: ping");
+  assert.equal(assistant.status, "complete");
+  assert.equal(assistant.output_tokens, 5);
+
+  // session resumed on the conversation, provider recorded
+  const conv = await ctx.db.selectFrom("conversations").where("id", "=", cos.conversation_id).selectAll().executeTakeFirstOrThrow();
+  assert.equal(conv.session_id, "sess-123");
+  assert.equal(conv.session_provider, "claude");
+
+  // full event trace
+  assert.ok(events.filter((e) => e === "message.created").length === 2);
+  assert.ok(events.includes("message.completed"));
+
+  await ctx.db.destroy();
+});
+
+test("PROOF-OF-LIFE: github connector commit through gate + approval + vault", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const ctx = freshCtx();
+  const { id: companyId, cosEmployeeId: emp } = await createCompany(ctx, { name: "A" }, { kind: "user" });
+
+  // a throwaway git repo to commit into
+  const repo = path.join(os.tmpdir(), `cf-repo-${randomUUID()}`);
+  fs.mkdirSync(repo, { recursive: true });
+  const g = (args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
+  g(["init", "-q"]);
+  g(["config", "user.email", "a@b.c"]);
+  g(["config", "user.name", "Test"]);
+  fs.writeFileSync(path.join(repo, "README.md"), "# hello");
+
+  // PAT lives in the encrypted vault (proves connector<->vault path)
+  await storeSecret(ctx, companyId, "github_pat", "ghp_dummy");
+
+  // Without a grant, an external-write is denied.
+  await assert.rejects(
+    () => invokeTool({ ctx, companyId, employeeId: emp }, "github.commit_push", { cwd: repo, message: "x" }),
+    /denied/,
+  );
+
+  // Grant external-read only -> the write must be human-approved.
+  await grantCapability(ctx, companyId, emp, "connector:github", "external-read");
+  const gated = await invokeTool({ ctx, companyId, employeeId: emp }, "github.commit_push", {
+    cwd: repo,
+    message: "agent: initial commit",
+  });
+  assert.equal(gated.status, "approval");
+  if (gated.status !== "approval") return;
+
+  // Human approves -> the commit actually happens.
+  const resolved = await resolveApproval(ctx, gated.approvalId, "approved", "user");
+  const { runToolApproved } = await import("../tools/registry");
+  const out = (await runToolApproved(
+    { ctx, companyId, employeeId: resolved.employeeId! },
+    resolved.action,
+    resolved.detail,
+  )) as { committed: boolean; sha: string };
+  assert.equal(out.committed, true);
+  assert.match(out.sha, /^[0-9a-f]{40}$/);
+  // the commit is real
+  const log = g(["log", "--oneline"]).trim();
+  assert.match(log, /agent: initial commit/);
+
+  await ctx.db.destroy();
+});
+
+// keep tmp dir from filling forever in CI
+test.after?.(() => {
+  try {
+    for (const f of fs.readdirSync(os.tmpdir())) {
+      if (f.startsWith("cf-test-") || f.startsWith("cf-mig-")) {
+        try { fs.unlinkSync(path.join(os.tmpdir(), f)); } catch {}
+      }
+    }
+  } catch {}
+});
