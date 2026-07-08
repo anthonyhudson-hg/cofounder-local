@@ -88,7 +88,28 @@ fn resolve_db_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("cofounder.db"))
 }
 
-/// Spawns `node <script>` with piped stdio and `kill_on_drop`.
+/// Resolves the Node binary to spawn the runtime with. A bundled build ships a
+/// portable Node as a Tauri `externalBin` sidecar — confirmed empirically that
+/// it lands directly beside the main executable with the target-triple suffix
+/// stripped (`sidecar-node-x86_64-pc-windows-msvc.exe` -> `sidecar-node.exe`),
+/// so this is a plain `current_exe()`-relative lookup, not `resource_dir()`
+/// (unlike `resolve_runtime_script`/the JS resources, which are separate Tauri
+/// `resources`, not an `externalBin`). Falls back to a system `node` on PATH
+/// for dev, where no bundled binary exists — this is the ONLY thing that makes
+/// a dev machine's Node a requirement; a bundled release build carries its own.
+fn resolve_node_binary(_app: &AppHandle) -> Result<PathBuf, String> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let bundled = dir.join("sidecar-node.exe");
+            if bundled.exists() {
+                return Ok(bundled);
+            }
+        }
+    }
+    Ok(PathBuf::from("node"))
+}
+
+/// Spawns `<node_binary> <script>` with piped stdio and `kill_on_drop`.
 struct SpawnedProcess {
     child: Child,
     stdin: ChildStdin,
@@ -96,8 +117,12 @@ struct SpawnedProcess {
     stderr: ChildStderr,
 }
 
-fn spawn_node_process(script: &PathBuf, extra_env: &[(&str, &std::ffi::OsStr)]) -> Result<SpawnedProcess, String> {
-    let mut cmd = Command::new("node");
+fn spawn_node_process(
+    node_binary: &std::path::Path,
+    script: &PathBuf,
+    extra_env: &[(&str, &std::ffi::OsStr)],
+) -> Result<SpawnedProcess, String> {
+    let mut cmd = Command::new(node_binary);
     cmd.arg(script)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -108,7 +133,7 @@ fn spawn_node_process(script: &PathBuf, extra_env: &[(&str, &std::ffi::OsStr)]) 
     }
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("failed to spawn node process at {script:?}: {e}"))?;
+        .map_err(|e| format!("failed to spawn {node_binary:?} {script:?}: {e}"))?;
 
     let stdin = child.stdin.take().ok_or("process missing stdin")?;
     let stdout = child.stdout.take().ok_or("process missing stdout")?;
@@ -159,11 +184,12 @@ pub fn spawn_runtime(app: AppHandle) {
 }
 
 async fn spawn_runtime_inner(app: AppHandle) -> Result<(), String> {
+    let node_binary = resolve_node_binary(&app)?;
     let script = resolve_runtime_script(&app)?;
     let db_path = resolve_db_path(&app)?;
     let db_path_os = db_path.as_os_str();
 
-    let proc = spawn_node_process(&script, &[("COFOUNDER_DB_PATH", db_path_os)])?;
+    let proc = spawn_node_process(&node_binary, &script, &[("COFOUNDER_DB_PATH", db_path_os)])?;
 
     {
         let state = app.state::<RuntimeState>();
