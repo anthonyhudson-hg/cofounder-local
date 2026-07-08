@@ -149,6 +149,11 @@ async function companyOf(ctx: RuntimeContext, conversationId: string): Promise<s
   return c?.company_id ?? null;
 }
 
+async function companyOfMessage(ctx: RuntimeContext, messageId: string): Promise<string | null> {
+  const row = await ctx.db.selectFrom("messages").where("id", "=", messageId).select("conversation_id").executeTakeFirst();
+  return row ? companyOf(ctx, row.conversation_id) : null;
+}
+
 export async function insertUserMessage(
   ctx: RuntimeContext,
   m: { id: string; conversationId: string; content: string; threadRootId?: string | null; replyToMessageId?: string | null },
@@ -167,10 +172,17 @@ export async function insertAssistantPlaceholder(
   ctx: RuntimeContext,
   m: { id: string; conversationId: string; model: string; effort: string; debugPayload?: string | null; threadRootId?: string | null; authorEmployeeId: string },
 ): Promise<void> {
-  await ctx.db.insertInto("messages").values({
-    id: m.id, conversation_id: m.conversationId, role: "assistant", content: "", model: m.model, effort: m.effort,
-    status: "streaming", debug_payload: m.debugPayload ?? null, thread_root_id: m.threadRootId ?? null, author_employee_id: m.authorEmployeeId,
-  }).execute();
+  // Was a raw ctx.db write with no emit — violated the "every command goes through
+  // mutate() so state and its event log never diverge" invariant (runtime/unitOfWork.ts)
+  // that this function's own sibling insertUserMessage already follows (report §1.5).
+  const companyId = await companyOf(ctx, m.conversationId);
+  await mutate(ctx, async (trx, emit) => {
+    await trx.insertInto("messages").values({
+      id: m.id, conversation_id: m.conversationId, role: "assistant", content: "", model: m.model, effort: m.effort,
+      status: "streaming", debug_payload: m.debugPayload ?? null, thread_root_id: m.threadRootId ?? null, author_employee_id: m.authorEmployeeId,
+    }).execute();
+    await emit({ companyId, type: "message.created", subjectId: m.id, actor: { kind: "employee", employeeId: m.authorEmployeeId }, payload: { conversationId: m.conversationId, role: "assistant" } });
+  });
 }
 
 export async function insertChannelAssistantMessage(
@@ -193,9 +205,13 @@ export async function insertErrorMessage(
   ctx: RuntimeContext,
   m: { id: string; conversationId: string; errorMessage: string; authorEmployeeId: string },
 ): Promise<void> {
-  await ctx.db.insertInto("messages").values({
-    id: m.id, conversation_id: m.conversationId, role: "assistant", content: "", status: "error", error_message: m.errorMessage, author_employee_id: m.authorEmployeeId,
-  }).execute();
+  const companyId = await companyOf(ctx, m.conversationId);
+  await mutate(ctx, async (trx, emit) => {
+    await trx.insertInto("messages").values({
+      id: m.id, conversation_id: m.conversationId, role: "assistant", content: "", status: "error", error_message: m.errorMessage, author_employee_id: m.authorEmployeeId,
+    }).execute();
+    await emit({ companyId, type: "message.created", subjectId: m.id, actor: { kind: "employee", employeeId: m.authorEmployeeId }, payload: { conversationId: m.conversationId, role: "assistant", status: "error" } });
+  });
 }
 
 export async function finalizeMessage(
@@ -214,7 +230,11 @@ export async function finalizeMessage(
 }
 
 export async function setMessageError(ctx: RuntimeContext, id: string, message: string): Promise<void> {
-  await ctx.db.updateTable("messages").set({ status: "error", error_message: message }).where("id", "=", id).execute();
+  const companyId = await companyOfMessage(ctx, id);
+  await mutate(ctx, async (trx, emit) => {
+    await trx.updateTable("messages").set({ status: "error", error_message: message }).where("id", "=", id).execute();
+    await emit({ companyId, type: "message.errored", subjectId: id, actor: { kind: "system" }, payload: {} });
+  });
 }
 
 export async function getConversationSession(ctx: RuntimeContext, conversationId: string) {
@@ -224,11 +244,19 @@ export async function getConversationSession(ctx: RuntimeContext, conversationId
 }
 
 export async function setConversationSession(ctx: RuntimeContext, conversationId: string, sessionId: string, provider: string): Promise<void> {
-  await ctx.db.updateTable("conversations").set({ session_id: sessionId, session_provider: provider }).where("id", "=", conversationId).execute();
+  const companyId = await companyOf(ctx, conversationId);
+  await mutate(ctx, async (trx, emit) => {
+    await trx.updateTable("conversations").set({ session_id: sessionId, session_provider: provider }).where("id", "=", conversationId).execute();
+    await emit({ companyId, type: "conversation.sessionSet", subjectId: conversationId, actor: { kind: "system" }, payload: { provider } });
+  });
 }
 
 export async function addReaction(ctx: RuntimeContext, messageId: string, emoji: string, reactor: string): Promise<void> {
-  await ctx.db.insertInto("reactions").values({ id: randomUUID(), message_id: messageId, emoji, reactor }).onConflict((oc) => oc.doNothing()).execute();
+  const companyId = await companyOfMessage(ctx, messageId);
+  await mutate(ctx, async (trx, emit) => {
+    await trx.insertInto("reactions").values({ id: randomUUID(), message_id: messageId, emoji, reactor }).onConflict((oc) => oc.doNothing()).execute();
+    await emit({ companyId, type: "reaction.added", subjectId: messageId, actor: { kind: "employee", employeeId: reactor }, payload: { emoji } });
+  });
 }
 
 export async function recentMessages(ctx: RuntimeContext, conversationId: string, limit: number) {
@@ -246,15 +274,23 @@ export async function getAgentSession(ctx: RuntimeContext, conversationId: strin
 }
 
 export async function upsertAgentSession(ctx: RuntimeContext, conversationId: string, employeeId: string, sessionId: string, provider: string): Promise<void> {
-  await ctx.db
-    .insertInto("agent_sessions")
-    .values({ id: randomUUID(), conversation_id: conversationId, employee_id: employeeId, session_id: sessionId, session_provider: provider, updated_at: new Date().toISOString() })
-    .onConflict((oc) => oc.columns(["conversation_id", "employee_id"]).doUpdateSet({ session_id: sessionId, session_provider: provider, updated_at: new Date().toISOString() }))
-    .execute();
+  const companyId = await companyOf(ctx, conversationId);
+  await mutate(ctx, async (trx, emit) => {
+    await trx
+      .insertInto("agent_sessions")
+      .values({ id: randomUUID(), conversation_id: conversationId, employee_id: employeeId, session_id: sessionId, session_provider: provider, updated_at: new Date().toISOString() })
+      .onConflict((oc) => oc.columns(["conversation_id", "employee_id"]).doUpdateSet({ session_id: sessionId, session_provider: provider, updated_at: new Date().toISOString() }))
+      .execute();
+    await emit({ companyId, type: "agentSession.upserted", subjectId: conversationId, actor: { kind: "employee", employeeId }, payload: { provider } });
+  });
 }
 
 export async function insertRelevanceCheck(ctx: RuntimeContext, messageId: string, employeeId: string, decision: "respond" | "skip", reason: string): Promise<void> {
-  await ctx.db.insertInto("relevance_checks").values({ id: randomUUID(), message_id: messageId, employee_id: employeeId, decision, reason }).execute();
+  const companyId = await companyOfMessage(ctx, messageId);
+  await mutate(ctx, async (trx, emit) => {
+    await trx.insertInto("relevance_checks").values({ id: randomUUID(), message_id: messageId, employee_id: employeeId, decision, reason }).execute();
+    await emit({ companyId, type: "relevanceCheck.inserted", subjectId: messageId, actor: { kind: "employee", employeeId }, payload: { decision } });
+  });
 }
 
 /**

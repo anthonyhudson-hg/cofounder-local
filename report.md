@@ -76,7 +76,10 @@ These patterns repeat across many files. Fix the pattern once instead of patchin
 
 **Fix:** add one thin runtime validator at the single choke point each side already has (`dispatch()` on the runtime side, the `p<T>()` helper on the register.ts side) rather than trusting `as` casts. Don't need a full schema library — even a shape/property-existence guard turns a 3-layers-deep opaque crash into a clean "bad request" at the boundary.
 
-### 1.5 — Event-sourcing is bypassed by about half the write paths — MEDIUM
+### 1.5 — Event-sourcing is bypassed by about half the write paths — MEDIUM — ✅ DONE
+
+**Fix applied:** all seven functions now route through `mutate()`/`emit()`: `insertAssistantPlaceholder`/`insertErrorMessage` emit `message.created`, `setMessageError` emits the new `message.errored`, `setConversationSession` emits the new `conversation.sessionSet`, `addReaction` emits the new `reaction.added`, `upsertAgentSession` emits the new `agentSession.upserted`, `insertRelevanceCheck` emits the new `relevanceCheck.inserted`. Added a `companyOfMessage` helper (message → conversation → company) for the functions that only had a message id to key off of. All sidecar tests, including the event-count-asserting "chat turn loop" test, still pass unchanged since `sendMessage`'s own inline logic (a separate code path) was already correct.
+
 **Where:** `sidecar/src/domains/conversations/service.ts`: `insertAssistantPlaceholder` (166-174), `insertErrorMessage` (192-199), `setMessageError` (216-218), `setConversationSession` (226-228), `addReaction` (230-232), `upsertAgentSession` (248-254), `insertRelevanceCheck` (256-258) — all write via raw `ctx.db.insertInto/updateTable(...)` instead of `mutate(ctx, ...)`.
 
 **Failure scenario:** `runtime/unitOfWork.ts` documents an explicit invariant — "every command goes through it so state and its event log never diverge" — that these seven functions violate. `toggleReaction` emits `reaction.toggled`; `addReaction` (used by the granular chat-ops path) does not. `insertUserMessage` emits `message.created`; `insertAssistantPlaceholder` (the streaming-start step in the *same flow*) does not. Any current or future consumer that generically subscribes to the event bus — audit trail, cross-window sync, notification pipeline — silently misses these transitions.
