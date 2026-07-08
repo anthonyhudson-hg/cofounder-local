@@ -273,8 +273,14 @@ test.after?.(() => {
   try {
     for (const f of fs.readdirSync(os.tmpdir())) {
       if (f.startsWith("cf-test-") || f.startsWith("cf-mig-")) {
-        try { fs.unlinkSync(path.join(os.tmpdir(), f)); } catch {}
+        try {
+          fs.unlinkSync(path.join(os.tmpdir(), f));
+        } catch {
+          // best-effort cleanup only — a locked/already-removed file is fine to skip
+        }
       }
     }
-  } catch {}
+  } catch {
+    // best-effort cleanup only — a transient tmpdir read failure isn't test-fatal
+  }
 });

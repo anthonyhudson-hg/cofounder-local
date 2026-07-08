@@ -43,9 +43,9 @@ async function git(cwd: string, args: string[], extraEnv?: Record<string, string
   } catch (err) {
     const e = err as NodeJS.ErrnoException & { killed?: boolean; stderr?: string };
     if (e.killed || e.code === "ETIMEDOUT") {
-      throw new Error(`git ${args[0]} timed out after ${GIT_TIMEOUT_MS}ms`);
+      throw new Error(`git ${args[0]} timed out after ${GIT_TIMEOUT_MS}ms`, { cause: err });
     }
-    throw new Error(`git ${args.join(" ")} failed: ${e.stderr?.trim() || e.message}`);
+    throw new Error(`git ${args.join(" ")} failed: ${e.stderr?.trim() || e.message}`, { cause: err });
   }
 }
 
@@ -131,6 +131,7 @@ const commitPush: Tool<CommitPushInput, { committed: boolean; sha: string | null
         // read would otherwise dead-end confusingly (report §2.2).
         throw new Error(
           `commit succeeded (${sha}) but push to ${remote}/${branch} failed: ${err instanceof Error ? err.message : String(err)}`,
+          { cause: err },
         );
       }
     }
