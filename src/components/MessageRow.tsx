@@ -1,5 +1,5 @@
 import { ArrowBendUpLeft, CaretRight, DotsThreeVertical, Plus } from "@phosphor-icons/react";
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { QUICK_REACTIONS } from "../lib/emoji";
 import { MentionTarget } from "../lib/mentions";
 import { Message, modelLabel } from "../types";
@@ -9,28 +9,36 @@ import { Emoji } from "./Emoji";
 import { EmojiPicker } from "./EmojiPicker";
 import { MarkdownContent } from "./MarkdownContent";
 
-interface ReplyPreview {
-  authorName: string;
-  snippet: string;
-}
-
 interface Props {
   message: Message;
   displayName: string;
   avatar?: string | null;
   reactions: string[];
-  onToggleReaction: (emoji: string) => void;
+  // Raw, row-id-taking callbacks (stable references from the owning hook) rather than
+  // MessageList pre-binding a fresh `() => onX(m.id)` closure per row per render — that
+  // would defeat memoization below since a "new" prop value looks like a real change
+  // (report §5.2/§6.1: every row was re-rendering on every streamed token).
+  onToggleReaction: (messageId: string, emoji: string) => void;
   showDebug: boolean;
   mentionTargets: MentionTarget[];
   onMentionClick: (target: MentionTarget) => void;
   replyCount?: number;
-  onOpenThread?: () => void;
-  onReply?: () => void;
-  replyPreview?: ReplyPreview | null;
+  onOpenThread?: (messageId: string) => void;
+  onReply?: (message: Message) => void;
+  // Split into primitives (not a `{authorName, snippet}` object) so a value that
+  // hasn't actually changed compares equal under React.memo's default shallow
+  // comparison even if MessageList recomputes it fresh every render.
+  replyAuthorName?: string;
+  replySnippet?: string;
 }
 
 function formatTime(iso: string): string {
-  const d = new Date(iso.includes("Z") || iso.includes("+") ? iso : iso + "Z");
+  // `iso` is naive/UTC unless it carries an explicit offset — match a real trailing
+  // offset (`Z` or `+HH:MM`/`-HH:MM`) rather than a bare substring check, which missed
+  // negative offsets (`...-05:00` contains neither "Z" nor "+") and silently blanked
+  // the timestamp for them (report §5.5).
+  const hasOffset = /(?:Z|[+-]\d{2}:?\d{2})$/.test(iso);
+  const d = new Date(hasOffset ? iso : iso + "Z");
   if (Number.isNaN(d.getTime())) return "";
   return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
@@ -44,7 +52,7 @@ function formatUsage(m: Message): string | null {
   return parts.length ? parts.join(" · ") : null;
 }
 
-export function MessageRow({
+function MessageRowImpl({
   message: m,
   displayName,
   avatar,
@@ -56,10 +64,12 @@ export function MessageRow({
   replyCount,
   onOpenThread,
   onReply,
-  replyPreview,
+  replyAuthorName,
+  replySnippet,
 }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const usage = formatUsage(m);
   const modelEffortLine =
@@ -78,6 +88,11 @@ export function MessageRow({
     return () => document.removeEventListener("mousedown", handler);
   }, [menuOpen]);
 
+  // Group instead of dedup-and-discard: previously N employees reacting with the same
+  // emoji collapsed to a single badge with the count thrown away (report §5.9).
+  const reactionCounts = new Map<string, number>();
+  for (const emoji of reactions) reactionCounts.set(emoji, (reactionCounts.get(emoji) ?? 0) + 1);
+
   return (
     <div className="message-row">
       <Avatar name={displayName} avatar={m.role === "assistant" ? avatar : null} bot={m.role === "assistant"} />
@@ -87,9 +102,9 @@ export function MessageRow({
           <span className="message-time">{formatTime(m.created_at)}</span>
           {modelEffortLine && <span className="message-model-effort">{modelEffortLine}</span>}
         </div>
-        {replyPreview && (
+        {replyAuthorName && (
           <div className="reply-preview">
-            Replying to <strong>{replyPreview.authorName}</strong>: {replyPreview.snippet}
+            Replying to <strong>{replyAuthorName}</strong>{replySnippet ? `: ${replySnippet}` : ""}
           </div>
         )}
         <div className="message-content">
@@ -98,17 +113,18 @@ export function MessageRow({
           {m.status === "error" && <div className="message-error">Error: {m.error_message}</div>}
         </div>
         {usage && <div className="message-usage">{usage}</div>}
-        {reactions.length > 0 && (
+        {reactionCounts.size > 0 && (
           <div className="reaction-badges">
-            {Array.from(new Set(reactions)).map((emoji) => (
-              <button key={emoji} className="reaction-badge" onClick={() => onToggleReaction(emoji)}>
+            {Array.from(reactionCounts.entries()).map(([emoji, count]) => (
+              <button key={emoji} className="reaction-badge" onClick={() => onToggleReaction(m.id, emoji)}>
                 <Emoji emoji={emoji} size={15} />
+                {count > 1 && <span className="reaction-badge-count">{count}</span>}
               </button>
             ))}
           </div>
         )}
         {!!replyCount && (
-          <button className="thread-replies-btn" onClick={onOpenThread}>
+          <button className="thread-replies-btn" onClick={() => onOpenThread?.(m.id)}>
             {replyCount} {replyCount === 1 ? "reply" : "replies"} <CaretRight />
           </button>
         )}
@@ -121,7 +137,7 @@ export function MessageRow({
             key={emoji}
             className="hover-toolbar-btn reaction-pick"
             title={`React ${emoji}`}
-            onClick={() => onToggleReaction(emoji)}
+            onClick={() => onToggleReaction(m.id, emoji)}
           >
             <Emoji emoji={emoji} size={17} />
           </button>
@@ -134,10 +150,12 @@ export function MessageRow({
           >
             <Plus />
           </button>
-          {pickerOpen && <EmojiPicker onPick={onToggleReaction} onClose={() => setPickerOpen(false)} />}
+          {pickerOpen && (
+            <EmojiPicker onPick={(emoji) => onToggleReaction(m.id, emoji)} onClose={() => setPickerOpen(false)} />
+          )}
         </div>
         {onReply && (
-          <button className="hover-toolbar-btn" title="Reply in thread" onClick={onReply}>
+          <button className="hover-toolbar-btn" title="Reply in thread" onClick={() => onReply(m)}>
             <ArrowBendUpLeft />
           </button>
         )}
@@ -154,11 +172,17 @@ export function MessageRow({
               <button
                 className="kebab-menu-item"
                 onClick={() => {
-                  navigator.clipboard.writeText(m.content);
+                  navigator.clipboard
+                    .writeText(m.content)
+                    .then(() => {
+                      setCopied(true);
+                      setTimeout(() => setCopied(false), 1200);
+                    })
+                    .catch(() => {});
                   setMenuOpen(false);
                 }}
               >
-                Copy text
+                {copied ? "Copied!" : "Copy text"}
               </button>
             </div>
           )}
@@ -167,3 +191,11 @@ export function MessageRow({
     </div>
   );
 }
+
+// Memoized: this hook's `messages` array gets a new reference on every streamed token
+// (see useConversation/useChannel's applyPatch), but unchanged rows keep the SAME
+// message object reference — so as long as the other props stay referentially/value
+// stable (see MessageList's use of raw callbacks + primitive reply-preview props +
+// a shared empty-reactions sentinel), only the row actually streaming re-renders
+// instead of every row in the conversation on every token (report §6.1/Part 0 #8).
+export const MessageRow = memo(MessageRowImpl);

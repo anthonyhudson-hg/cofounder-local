@@ -15,7 +15,7 @@ Severity key: **CRITICAL** (data loss / total feature death) · **HIGH** (real, 
 5. [x] **DONE** — **Manager-cycle validation is cosmetic.** The frontend blocks direct-report cycles only; the backend validates nothing. A 2+ hop cycle (A→C→B→A) is fully achievable and makes employees vanish from the org chart with no error. (§4.1)
 6. **The sidecar/runtime child processes have no crash detection, no restart, and can be orphaned on app exit.** One crash = silently dead AI chat for the rest of the session, surfaced only as a raw broken-pipe error. (§4.2)
 7. **Codex's "no tools" sandboxing claim is false**, and `CodexProvider.runTurn` unconditionally reports `success: true` even when nothing observably succeeded. (§4.3, §4.4)
-8. **`MessageList` re-renders every message row on every streamed token.** No memoization anywhere in the hot path. (§6.1)
+8. [x] **DONE** — **`MessageList` re-renders every message row on every streamed token.** No memoization anywhere in the hot path. (§6.1)
 9. [x] **DONE** — **Six-plus UI actions (create/clone/delete company, create channel/group, hire, onboarding generate/finish) swallow errors silently** — `try { } finally { setBusy(false) }` with no `catch`, anywhere. (§1.2)
 
 ---
@@ -351,7 +351,10 @@ Related, same file:
 - **MEDIUM — correctness/race**: `skip()` (93-98) has no busy-guard, unlike `generate`/`finish` — rapid double-click fires two concurrent `company.update` + `onboarding.apply` pairs with no ordering guarantee.
 - **LOW**: company name isn't trimmed before persisting (94) — a whitespace-only name is truthy and gets saved verbatim.
 
-### 5.2 — `MessageList`: full re-render cascade on every streamed token — HIGH (performance)
+### 5.2 — `MessageList`: full re-render cascade on every streamed token — HIGH (performance) — ✅ DONE
+
+**Fix applied:** `MessageRow` is now `React.memo`-wrapped. To make that actually effective: `MessageList` passes the raw, stable, row-id-taking callbacks (`onToggleReaction`, `onOpenThread`, `onReply`) straight through instead of pre-binding a fresh per-row closure every render; the `{authorName, snippet}` reply-preview object was split into two primitive props (`replyAuthorName`/`replySnippet`) so recomputing them fresh each render still compares equal under shallow prop comparison; messages with no reactions now share one frozen `EMPTY_REACTIONS` sentinel instead of a fresh `?? []` literal; `messagesById` is `useMemo`'d; and `ChatPane.tsx`'s `mentionTargets`/`handleMentionClick` (previously rebuilt every render, defeating all of the above) are now `useMemo`/`useCallback`'d. `ThreadPanel.tsx`, which also renders `MessageRow`, still had the old per-row-closure wrapping pattern — fixed to match the new contract (this was actually a latent correctness bug post-refactor: TS's parameter-count contravariance let a stale single-arg wrapper type-check against the new two-arg signature, which would have silently dropped the real emoji argument at runtime). Auto-scroll now only fires if the viewport was already near the bottom (report §5.2's paired finding). Reaction badges also now show a count instead of dropping it via `Set` dedup (report §5.9), and `formatTime` was fixed to handle negative UTC offsets correctly (report §5.5).
+
 **File:** `src/components/MessageList.tsx:43, 75-109`
 
 `messages` gets a new array reference on every streamed token (confirmed in `useConversation.ts`). Neither `MessageList` nor `MessageRow` is wrapped in `React.memo`, and `messagesById`/`replyPreview`/`authorInfo` are recomputed from scratch every render regardless of which row actually changed. Practical effect: **every message row in the entire conversation re-renders on every single streamed token** — visible jank at exactly the most latency-sensitive moment, in an app meant for daily heavy use.
@@ -363,7 +366,10 @@ Related, same file:
 - **MEDIUM — architecture**: `mentionTargets`/`scopedMentionTargets(...)` (called inline in `ChatPane.tsx`'s render body) is a brand-new object every render, which flows down and defeats the `useMemo` in `Composer.tsx:103` that depends on it — that memo effectively never caches. Wrap the call site in `useMemo`.
 - **LOW**: no virtualization — fine at MVP scale, will degrade over months of accumulated history.
 
-### 5.3 — `ThreadPanel`: no live streaming, looks frozen during generation — HIGH (UX)
+### 5.3 — `ThreadPanel`: no live streaming, looks frozen during generation — HIGH (UX) — ⚠️ PARTIAL
+
+**Fix applied:** auto-scroll-to-newest-reply added, `Escape`-to-close wired, close button given an `aria-label`, and the now-mandatory `onToggleReaction`/reaction-empty-sentinel contract from §5.2's `MessageRow` refactor applied here too (this file had drifted onto the old, now-broken per-row-closure pattern). **Not done:** the core finding — deriving thread messages from the same live streaming source as the main pane instead of a separate reload-on-idle hook — is a genuine architectural change (`useThread` would need to share state with `useConversation`/`useChannel` rather than polling independently) and is left as a follow-up; noted here rather than silently left off the list.
+
 **File:** `src/components/ThreadPanel.tsx:49-54`
 
 `useThread` is an entirely separate, poll-on-`sending`-flip data source from the streaming `messages` state driving the main pane. Unlike `MessageList` (shows a live streaming cursor via `m.status === "streaming"`), the thread panel shows nothing while a reply generates, then the complete message pops in all at once when `sending` flips back to `false` — a jarring, inconsistent experience relative to the main pane, and will read as broken/frozen during long generations. Compounded by `sending` being conversation-wide, not thread-scoped: sending *any* unrelated top-level message also triggers an unnecessary full reload of this thread.
@@ -381,7 +387,10 @@ Related, same file:
 - **MEDIUM — UX**: switching conversations destroys the TipTap editor (`useEditor(..., [placeholder])` recreates on every placeholder change, which changes per-conversation) — any unsent draft is lost on channel/DM switch, unlike Slack/Discord's per-channel draft persistence.
 - **MEDIUM — a11y**: mention dropdown has no `role="listbox"`/`aria-expanded`/`aria-activedescendant`; toolbar toggle buttons have no `aria-pressed`.
 
-### 5.5 — `MessageRow`: timestamp parsing mishandles negative UTC offsets — MEDIUM
+### 5.5 — `MessageRow`: timestamp parsing mishandles negative UTC offsets — MEDIUM — ✅ DONE
+
+**Fix applied:** replaced the `iso.includes("Z") || iso.includes("+")` substring check with a proper trailing-offset regex (`/(?:Z|[+-]\d{2}:?\d{2})$/`), fixed alongside §5.2 while the file was open.
+
 **File:** `src/components/MessageRow.tsx:32-36`
 
 ```js

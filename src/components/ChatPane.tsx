@@ -1,10 +1,10 @@
 import { Hash, UsersThree } from "@phosphor-icons/react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useChannel } from "../hooks/useChannel";
 import { useChannelMembership } from "../hooks/useChannelMembership";
 import { useConversation } from "../hooks/useConversation";
 import { MentionTarget, scopedMentionTargets } from "../lib/mentions";
-import { Conversation, Effort, Employee, Message } from "../types";
+import { Conversation, DEFAULT_MODEL_ID, Effort, Employee, Message } from "../types";
 import { Avatar } from "./Avatar";
 import { ChannelMembersModal } from "./ChannelMembersModal";
 import { Composer } from "./Composer";
@@ -60,13 +60,20 @@ function ChannelChatPane({
   const [openThreadId, setOpenThreadId] = useState<string | null>(null);
   const [membersOpen, setMembersOpen] = useState(false);
 
-  const mentionTargets = scopedMentionTargets({
-    participantEmployees: members.map((m) => ({
-      conversation_id: m.conversation_id,
-      name: employeesById[m.id]?.name ?? "Employee",
-    })),
-    accessibleChannels: channels.filter((c) => c.id !== conversation.id),
-  });
+  // Memoized: this was recomputed to a brand-new array/object graph every render
+  // regardless of whether members/channels actually changed, which flowed down into
+  // MessageList/MessageRow/MarkdownContent and defeated memoization there (report §5.2).
+  const mentionTargets = useMemo(
+    () =>
+      scopedMentionTargets({
+        participantEmployees: members.map((m) => ({
+          conversation_id: m.conversation_id,
+          name: employeesById[m.id]?.name ?? "Employee",
+        })),
+        accessibleChannels: channels.filter((c) => c.id !== conversation.id),
+      }),
+    [members, employeesById, channels, conversation.id],
+  );
 
   useEffect(() => {
     setOpenThreadId(null);
@@ -84,7 +91,7 @@ function ChannelChatPane({
       }
     : null;
 
-  const handleMentionClick = (target: MentionTarget) => onNavigate(target.conversationId);
+  const handleMentionClick = useCallback((target: MentionTarget) => onNavigate(target.conversationId), [onNavigate]);
 
   return (
     <div className="chat-pane-row">
@@ -199,12 +206,16 @@ function DmChatPane({
   );
   const { memberOf: employeeChannelIds } = useChannelMembership(employee?.id ?? "");
 
-  const mentionTargets = scopedMentionTargets({
-    participantEmployees: employee ? [{ conversation_id: employee.conversation_id, name: conversation.name }] : [],
-    accessibleChannels: channels.filter((c) => employeeChannelIds.has(c.id)),
-  });
+  const mentionTargets = useMemo(
+    () =>
+      scopedMentionTargets({
+        participantEmployees: employee ? [{ conversation_id: employee.conversation_id, name: conversation.name }] : [],
+        accessibleChannels: channels.filter((c) => employeeChannelIds.has(c.id)),
+      }),
+    [employee, conversation.name, channels, employeeChannelIds],
+  );
 
-  const [model, setModel] = useState(employee?.default_model ?? "claude-sonnet-5");
+  const [model, setModel] = useState(employee?.default_model ?? DEFAULT_MODEL_ID);
   const [effort, setEffort] = useState<Effort>(employee?.default_effort ?? "medium");
   const [showDebug, setShowDebug] = useState(false);
   const [replyingTo, setReplyingTo] = useState<Message | null>(null);
@@ -226,7 +237,7 @@ function DmChatPane({
       }
     : null;
 
-  const handleMentionClick = (target: MentionTarget) => onNavigate(target.conversationId);
+  const handleMentionClick = useCallback((target: MentionTarget) => onNavigate(target.conversationId), [onNavigate]);
 
   return (
     <div className="chat-pane-row">

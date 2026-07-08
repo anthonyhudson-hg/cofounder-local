@@ -1362,6 +1362,13 @@ body {
   background: #d5efe6;
 }
 
+.reaction-badge-count {
+  margin-left: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #4a5568;
+}
+
 /* ---------- Hover toolbar / kebab menu ---------- */
 
 .hover-toolbar {

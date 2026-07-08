@@ -195,6 +195,11 @@ export const MODELS: ModelOption[] = [
   { id: "gpt-5-codex", label: "GPT-5 Codex", provider: "codex" },
 ];
 
+// Single source of truth for "the default model" — previously duplicated as the
+// literal string "claude-sonnet-5" at each fallback site, which would silently drift
+// out of sync if this registry's first entry ever changed (report §5-cross-cutting).
+export const DEFAULT_MODEL_ID = MODELS[0].id;
+
 export const PROVIDERS: Provider[] = ["claude", "codex"];
 
 export function modelLabel(id: string | null): string {
