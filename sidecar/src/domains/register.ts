@@ -9,7 +9,8 @@ import {
   getActiveCompanyId,
   setActiveCompanyId,
 } from "./companies/service";
-import { resolveApproval } from "./approvals/service";
+import { resolveApproval, listApprovals } from "./approvals/service";
+import { listEvents } from "./audit/service";
 import { invokeTool, runToolApproved } from "../tools/registry";
 import { registerMemoryTools } from "../tools/builtin/memory";
 import { registerGithubConnector } from "../connectors/github";
@@ -59,6 +60,8 @@ import {
   listMembershipsForEmployee,
   toggleMembership,
   listChannelMembers,
+  getAgentProfile,
+  updateAgentProfileField,
 } from "./employees/service";
 import {
   getUserProfile,
@@ -188,6 +191,14 @@ register("command:reaction.toggle", async (ctx, inbound) => {
 register("command:employee.update", async (ctx, inbound) => {
   const { conversationId, field, value } = p<{ conversationId: string; field: string; value: string | null }>(inbound);
   await updateEmployeeField(ctx, conversationId, field, value);
+  return { ok: true };
+});
+register("query:agentProfile.get", async (ctx, inbound) =>
+  getAgentProfile(ctx, p<{ employeeId: string }>(inbound).employeeId),
+);
+register("command:agentProfile.update", async (ctx, inbound) => {
+  const { employeeId, field, value } = p<{ employeeId: string; field: string; value: string }>(inbound);
+  await updateAgentProfileField(ctx, employeeId, field, value);
   return { ok: true };
 });
 register("command:employee.create", async (ctx, inbound) => {
@@ -388,4 +399,14 @@ register("command:approval.resolve", async (ctx, inbound) => {
   };
   const output = await runToolApproved(tc, resolved.action, resolved.detail);
   return { executed: true, output };
+});
+
+register("query:approvals.list", async (ctx, inbound) => {
+  const { status } = p<{ status?: "pending" | "approved" | "denied" | "expired" | null }>(inbound);
+  return listApprovals(ctx, requireCompany(inbound), status === undefined ? "pending" : status);
+});
+
+register("query:audit.list", async (ctx, inbound) => {
+  const { beforeSeq, limit } = p<{ beforeSeq?: number; limit?: number }>(inbound);
+  return listEvents(ctx, requireCompany(inbound), { beforeSeq, limit });
 });

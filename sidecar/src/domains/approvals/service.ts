@@ -10,6 +10,39 @@ export interface ApprovalRequest {
   correlationId?: string | null;
 }
 
+export interface ApprovalListItem {
+  id: string;
+  employeeId: string | null;
+  action: string;
+  detail: unknown;
+  status: "pending" | "approved" | "denied" | "expired";
+  requestedAt: string;
+  resolvedAt: string | null;
+  resolvedBy: string | null;
+}
+
+/** Lists a company's approval requests, most recent first. Defaults to pending
+ *  only (the actionable set); pass `status: null` for the full history. */
+export async function listApprovals(
+  ctx: RuntimeContext,
+  companyId: string,
+  status: "pending" | "approved" | "denied" | "expired" | null = "pending",
+): Promise<ApprovalListItem[]> {
+  let q = ctx.db.selectFrom("approvals").where("company_id", "=", companyId).selectAll();
+  if (status) q = q.where("status", "=", status);
+  const rows = await q.orderBy("requested_at", "desc").execute();
+  return rows.map((r) => ({
+    id: r.id,
+    employeeId: r.employee_id,
+    action: r.action,
+    detail: JSON.parse(r.detail),
+    status: r.status,
+    requestedAt: r.requested_at,
+    resolvedAt: r.resolved_at,
+    resolvedBy: r.resolved_by,
+  }));
+}
+
 /** Records a pending human-approval request and emits approval.requested. */
 export async function requestApproval(ctx: RuntimeContext, req: ApprovalRequest): Promise<string> {
   const id = randomUUID();

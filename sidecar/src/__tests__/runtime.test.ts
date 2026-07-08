@@ -100,6 +100,87 @@ test("capability gate: deny without grant, allow within, approval beyond", async
   await ctx.db.destroy();
 });
 
+test("capability gate: 'suggest' autonomy downgrades an otherwise-allowed write to approval (a real backstop, not just prompt guidance)", async () => {
+  const { updateAgentProfileField } = await import("../domains/employees/service");
+  const ctx = freshCtx();
+  const { id: companyId, cosEmployeeId: emp } = await createCompany(ctx, { name: "A" }, { kind: "user" });
+  const tc = { ctx, companyId, employeeId: emp };
+
+  await grantCapability(ctx, companyId, emp, "tool:memory", "write-internal");
+  // Baseline: no agent_profiles row yet (unconfigured) behaves exactly like
+  // today, before this feature existed — the grant alone decides.
+  const before = await invokeTool(tc, "memory.write", { key: "k", value: "v" });
+  assert.equal(before.status, "ok");
+
+  await updateAgentProfileField(ctx, emp, "autonomy_level", "suggest");
+  const afterSuggest = await invokeTool(tc, "memory.write", { key: "k2", value: "v2" });
+  assert.equal(afterSuggest.status, "approval", "suggest downgrades a write even though the grant covers it");
+
+  // A pure read stays ungated even under "suggest" — asking permission for
+  // every read would make the product unusable.
+  const readResult = await invokeTool(tc, "memory.read", { key: "k" });
+  assert.equal(readResult.status, "ok");
+
+  // Reverting to "act-with-approval" restores the grant-only baseline.
+  await updateAgentProfileField(ctx, emp, "autonomy_level", "act-with-approval");
+  const afterRevert = await invokeTool(tc, "memory.write", { key: "k3", value: "v3" });
+  assert.equal(afterRevert.status, "ok");
+
+  await ctx.db.destroy();
+});
+
+test("agent profile: defaults, update, JSON expertise round-trip, and field/value validation", async () => {
+  const { getAgentProfile, updateAgentProfileField } = await import("../domains/employees/service");
+  const ctx = freshCtx();
+  const { cosEmployeeId: emp } = await createCompany(ctx, { name: "A" }, { kind: "user" });
+
+  // No row yet — defaults match today's unconfigured behavior, not the DB
+  // column's own "suggest" default (which only applies once a row exists).
+  const initial = await getAgentProfile(ctx, emp);
+  assert.deepEqual(initial, { personality: "", communicationStyle: "", expertise: [], autonomyLevel: "act-with-approval" });
+
+  await updateAgentProfileField(ctx, emp, "personality", "Blunt, dry humor, gets to the point fast.");
+  await updateAgentProfileField(ctx, emp, "communication_style", "Short messages, bullet points over prose.");
+  await updateAgentProfileField(ctx, emp, "expertise", JSON.stringify(["fundraising", "hiring"]));
+  await updateAgentProfileField(ctx, emp, "autonomy_level", "autonomous");
+
+  const updated = await getAgentProfile(ctx, emp);
+  assert.equal(updated.personality, "Blunt, dry humor, gets to the point fast.");
+  assert.equal(updated.communicationStyle, "Short messages, bullet points over prose.");
+  assert.deepEqual(updated.expertise, ["fundraising", "hiring"]);
+  assert.equal(updated.autonomyLevel, "autonomous");
+
+  await assert.rejects(() => updateAgentProfileField(ctx, emp, "not_a_real_field", "x"), /invalid agent profile field/);
+  await assert.rejects(() => updateAgentProfileField(ctx, emp, "autonomy_level", "yolo"), /invalid autonomy level/);
+  await assert.rejects(() => updateAgentProfileField(ctx, emp, "expertise", "not json"), /JSON-encoded string array/);
+  await assert.rejects(() => updateAgentProfileField(ctx, "nonexistent-employee", "personality", "x"), /employee not found/);
+
+  await ctx.db.destroy();
+});
+
+test("agent profile: personality/communication-style/expertise/autonomy appear in the composed system prompt", async () => {
+  const { composeSystemPrompt } = await import("../runtime/promptBuilder");
+  const withProfile = composeSystemPrompt(
+    "",
+    "",
+    "You are Ada, Engineer in the Eng department. You report to Founder.",
+    { mission: "", preamble: "", additional_details: "" },
+    [],
+    { personality: "Enthusiastic and curious.", communicationStyle: "Casual, lots of emoji.", expertise: ["rust", "distributed systems"], autonomyLevel: "autonomous" },
+  );
+  assert.match(withProfile, /Personality: Enthusiastic and curious\./);
+  assert.match(withProfile, /Communication style: Casual, lots of emoji\./);
+  assert.match(withProfile, /Areas of expertise: rust, distributed systems/);
+  assert.match(withProfile, /Autonomy level: autonomous\./);
+
+  // Omitting the profile entirely (no 6th arg) must not blow up or leave stray
+  // "undefined" text in the prompt — every other caller of this function
+  // predates this feature.
+  const withoutProfile = composeSystemPrompt("", "", "identity", { mission: "", preamble: "", additional_details: "" }, []);
+  assert.ok(!withoutProfile.includes("undefined"));
+  assert.ok(!withoutProfile.includes("Autonomy level"));
+});
+
 test("approval round-trip: resolve approved re-runs the gated action", async () => {
   const ctx = freshCtx();
   const { id: companyId, cosEmployeeId: emp } = await createCompany(ctx, { name: "A" }, { kind: "user" });
@@ -115,6 +196,81 @@ test("approval round-trip: resolve approved re-runs the gated action", async () 
   assert.equal(read.status, "ok");
   if (read.status !== "ok") return;
   assert.equal((read.output as { entries: { value: string }[] }).entries[0].value, "gv");
+  await ctx.db.destroy();
+});
+
+test("approvals: listApprovals defaults to pending, is company-scoped, and status filters/history work", async () => {
+  const { listApprovals } = await import("../domains/approvals/service");
+  const ctx = freshCtx();
+  const { id: companyA, cosEmployeeId: empA } = await createCompany(ctx, { name: "A" }, { kind: "user" });
+  const { id: companyB, cosEmployeeId: empB } = await createCompany(ctx, { name: "B" }, { kind: "user" });
+
+  await grantCapability(ctx, companyA, empA, "tool:memory", "read");
+  await grantCapability(ctx, companyB, empB, "tool:memory", "read");
+  const gatedA = await invokeTool({ ctx, companyId: companyA, employeeId: empA }, "memory.write", { key: "k", value: "v" });
+  const gatedB = await invokeTool({ ctx, companyId: companyB, employeeId: empB }, "memory.write", { key: "k", value: "v" });
+  assert.equal(gatedA.status, "approval");
+  assert.equal(gatedB.status, "approval");
+  if (gatedA.status !== "approval" || gatedB.status !== "approval") return;
+
+  // Company-scoped: A's list never contains B's request or vice versa.
+  const pendingA = await listApprovals(ctx, companyA);
+  assert.equal(pendingA.length, 1);
+  assert.equal(pendingA[0].id, gatedA.approvalId);
+  assert.equal(pendingA[0].status, "pending");
+  assert.equal(pendingA[0].employeeId, empA);
+
+  await resolveApproval(ctx, gatedA.approvalId, "approved", "user");
+
+  // Default (pending-only) no longer includes the now-resolved request.
+  const pendingAfter = await listApprovals(ctx, companyA);
+  assert.equal(pendingAfter.length, 0);
+
+  // Full history (status: null) still shows it, now approved.
+  const historyA = await listApprovals(ctx, companyA, null);
+  assert.equal(historyA.length, 1);
+  assert.equal(historyA[0].status, "approved");
+  assert.equal(historyA[0].resolvedBy, "user");
+
+  await ctx.db.destroy();
+});
+
+test("audit log: listEvents is most-recent-first, company-scoped, and paginates backwards via beforeSeq", async () => {
+  const { listEvents } = await import("../domains/audit/service");
+  const ctx = freshCtx();
+  const { id: companyA } = await createCompany(ctx, { name: "A" }, { kind: "user" });
+  const { id: companyB } = await createCompany(ctx, { name: "B" }, { kind: "user" });
+
+  // createCompany itself already emits company.created + seedDefaults events
+  // for each company — enough real history to paginate through without
+  // fabricating events by hand.
+  const allA = await listEvents(ctx, companyA, { limit: 500 });
+  assert.ok(allA.length >= 2, "company A has real seeded event history");
+
+  const allB = await listEvents(ctx, companyB, { limit: 500 });
+  const aIds = new Set(allA.map((e) => e.id));
+  assert.ok(allB.every((e) => !aIds.has(e.id)), "no cross-company event leakage");
+
+  // Most-recent-first: seq strictly decreasing.
+  for (let i = 1; i < allA.length; i++) {
+    assert.ok(allA[i - 1].seq > allA[i].seq, "events are ordered most-recent-first by seq");
+  }
+
+  // Pagination: paging with beforeSeq set to the oldest-seen seq from a first
+  // page reproduces the rest of the list with no overlap and no gap.
+  const firstPage = await listEvents(ctx, companyA, { limit: 1 });
+  assert.equal(firstPage.length, 1);
+  const secondPage = await listEvents(ctx, companyA, { beforeSeq: firstPage[0].seq, limit: 500 });
+  assert.deepEqual(
+    [firstPage[0].seq, ...secondPage.map((e) => e.seq)],
+    allA.map((e) => e.seq),
+    "first page + beforeSeq-paginated rest reconstructs the full list",
+  );
+
+  // actor/payload are parsed back out of their JSON columns, not left as raw strings.
+  assert.equal(typeof allA[0].actor, "object");
+  assert.equal(typeof allA[0].payload, "object");
+
   await ctx.db.destroy();
 });
 

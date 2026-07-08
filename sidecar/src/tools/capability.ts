@@ -13,6 +13,16 @@ export type CapabilityDecision = "allow" | "approval" | "deny";
  * `autonomy_level` on the agent profile can auto-approve within policy: an
  * 'autonomous' agent's above-grant actions still surface an approval unless the
  * grant already covers them — deliberately conservative for external-write.
+ *
+ * `autonomy_level: "suggest"` is the one direction this gate actively narrows
+ * rather than widens: even a within-grant action beyond a harmless read gets
+ * downgraded to "approval". This is a real backstop, not just prompt guidance
+ * (see runtime/promptBuilder.ts's AUTONOMY_GUIDANCE) — the system prompt only
+ * shapes what the model *chooses* to do; this is what actually stops it.
+ * "act-with-approval" and "autonomous" both currently resolve identically to
+ * the base grant-only policy above — loosening the gate for "autonomous"
+ * beyond what the grant already allows is the "deliberately conservative"
+ * case the original docstring already flagged, and isn't done here.
  */
 export async function evaluateCapability(
   ctx: RuntimeContext,
@@ -28,8 +38,18 @@ export async function evaluateCapability(
     .executeTakeFirst();
 
   if (!grant) return "deny";
-  if (effectRank(effect) <= effectRank(grant.max_effect as Effect)) return "allow";
-  return "approval";
+  if (effectRank(effect) > effectRank(grant.max_effect as Effect)) return "approval";
+
+  if (effectRank(effect) > effectRank("read")) {
+    const profile = await ctx.db
+      .selectFrom("agent_profiles")
+      .where("employee_id", "=", employeeId)
+      .select(["autonomy_level"])
+      .executeTakeFirst();
+    if (profile?.autonomy_level === "suggest") return "approval";
+  }
+
+  return "allow";
 }
 
 /** Convenience for tests/seed: grant an employee a capability up to `maxEffect`. */

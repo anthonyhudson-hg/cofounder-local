@@ -7,7 +7,7 @@ import { formatReactionNoticesForPrompt } from "../../runtime/reactionFormatting
 import { findMentions, type MentionTarget } from "../../runtime/mentions";
 import { modelProvider } from "../../runtime/models";
 import { getProvider, drainTurn, type AgentProvider, type Effort } from "../../providers";
-import { resolveManagerName, employeeDisplayName, listChannelMembers, listResponsibilities } from "../employees/service";
+import { resolveManagerName, employeeDisplayName, listChannelMembers, listResponsibilities, getAgentProfile } from "../employees/service";
 import { getUserProfile } from "../settings/service";
 
 /** Lists a company's conversations (scoped). */
@@ -435,7 +435,8 @@ export async function sendMessage(
   // 2. compose system prompt (identity + DM-scoped mention/reaction guidance)
   const managerName = await resolveManagerName(ctx, employee.manager_employee_id, userFullName);
   const identity = buildIdentityBlock(conv.name, employee, managerName);
-  const baseSystemPrompt = composeSystemPrompt(company.profile, company.system_prompt, identity, employee, responsibilities);
+  const agentProfile = await getAgentProfile(ctx, employee.id);
+  const baseSystemPrompt = composeSystemPrompt(company.profile, company.system_prompt, identity, employee, responsibilities, agentProfile);
   const mentionScope = `This is a private 1:1 DM between you and ${userFullName || "the founder"}. There is nobody else here to @mention — do not @mention any other employee in this conversation.`;
   const systemPrompt = `${baseSystemPrompt}\n\n---\n\n${mentionScope}\n\n---\n\nIf the message you're replying to deserves a quick reaction in addition to (or instead of, if you have nothing to add) a full reply, end your response with a line like [[react:👍]] using one relevant emoji. Omit this entirely if no reaction is warranted.`;
 
@@ -454,6 +455,7 @@ export async function sendMessage(
     preamble: employee.preamble,
     responsibilities,
     additionalDetails: employee.additional_details,
+    agentProfile,
     prompt: promptWithNotices,
     reactionNotices: notices,
     resumeSessionId: resume,
@@ -800,7 +802,8 @@ export async function sendChannelMessage(
       const identityBlock = buildIdentityBlock(displayName, member, managerName);
       const responsibilityRows = await listResponsibilities(ctx, member.id);
       const responsibilities = responsibilityRows.map((r) => r.text);
-      const baseSystemPrompt = composeSystemPrompt(company.profile, company.system_prompt, identityBlock, member, responsibilities);
+      const agentProfile = await getAgentProfile(ctx, member.id);
+      const baseSystemPrompt = composeSystemPrompt(company.profile, company.system_prompt, identityBlock, member, responsibilities, agentProfile);
       const otherMemberNames = members
         .filter((m) => m.id !== member.id)
         .map((m) => memberNames.get(m.id))
@@ -849,6 +852,7 @@ export async function sendChannelMessage(
             preamble: member.preamble,
             responsibilities,
             additionalDetails: member.additional_details,
+            agentProfile,
             prompt: promptWithNotices,
             reactionNotices: notices,
             resumeSessionId,

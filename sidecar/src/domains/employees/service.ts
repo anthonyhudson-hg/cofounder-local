@@ -202,3 +202,98 @@ export async function resolveManagerName(
   const name = await employeeDisplayName(ctx, managerEmployeeId);
   return name ?? (userFullName || "the founder");
 }
+
+// ---- agent profile (personality/communication style/expertise/autonomy) ----
+
+export type AutonomyLevel = "suggest" | "act-with-approval" | "autonomous";
+export const AUTONOMY_LEVELS: readonly AutonomyLevel[] = ["suggest", "act-with-approval", "autonomous"];
+
+export interface AgentProfile {
+  personality: string;
+  communicationStyle: string;
+  expertise: string[];
+  autonomyLevel: AutonomyLevel;
+}
+
+// Deliberately NOT "suggest" (the DB column's own default once a row exists) —
+// an employee with no agent_profiles row yet has never been configured, and
+// should behave exactly like every employee did before this feature existed
+// (today's capability-gate policy, no extra approval friction). The column
+// default of "suggest" only takes effect once a row is actually created,
+// which happens on first explicit write via the UI — not implicitly for
+// every pre-existing employee the moment this ships (report-adjacent: a
+// silent, unrequested behavior change for existing users would be its own
+// bug). evaluateCapability() mirrors this same "no row = unconfigured, not
+// suggest" reasoning independently.
+const DEFAULT_AGENT_PROFILE: AgentProfile = {
+  personality: "",
+  communicationStyle: "",
+  expertise: [],
+  autonomyLevel: "act-with-approval",
+};
+
+/**
+ * `agent_profiles` rows are created lazily on first write (same pattern as
+ * `employee_responsibilities` — no row means "all defaults", not an error).
+ */
+export async function getAgentProfile(ctx: RuntimeContext, employeeId: string): Promise<AgentProfile> {
+  const row = await ctx.db
+    .selectFrom("agent_profiles")
+    .where("employee_id", "=", employeeId)
+    .selectAll()
+    .executeTakeFirst();
+  if (!row) return DEFAULT_AGENT_PROFILE;
+  let expertise: string[] = [];
+  try {
+    const parsed = JSON.parse(row.expertise);
+    if (Array.isArray(parsed)) expertise = parsed.filter((x): x is string => typeof x === "string");
+  } catch {
+    // Malformed JSON should never happen (only this module ever writes this column),
+    // but a corrupted value degrading to "no expertise" is safer than throwing and
+    // taking down prompt composition for every turn this employee ever takes.
+  }
+  return {
+    personality: row.personality,
+    communicationStyle: row.communication_style,
+    expertise,
+    autonomyLevel: row.autonomy_level,
+  };
+}
+
+const AGENT_PROFILE_FIELDS = new Set(["personality", "communication_style", "expertise", "autonomy_level"]);
+
+/**
+ * `value` for "expertise" is a JSON-encoded string[] (matches the column's own
+ * storage format — the wire contract mirrors the DB rather than introducing a
+ * second encoding). `field`/`value` come straight off the wire, so both are
+ * validated before touching a CHECK-constrained column (report §1.4-class fix).
+ */
+export async function updateAgentProfileField(
+  ctx: RuntimeContext,
+  employeeId: string,
+  field: string,
+  value: string,
+): Promise<void> {
+  if (!AGENT_PROFILE_FIELDS.has(field)) throw new Error(`invalid agent profile field: ${field}`);
+  if (field === "autonomy_level" && !AUTONOMY_LEVELS.includes(value as AutonomyLevel)) {
+    throw new Error(`invalid autonomy level: ${value}`);
+  }
+  if (field === "expertise") {
+    try {
+      const parsed = JSON.parse(value);
+      if (!Array.isArray(parsed)) throw new Error("not an array");
+    } catch {
+      throw new Error("expertise must be a JSON-encoded string array");
+    }
+  }
+  await mutate(ctx, async (trx, emit) => {
+    const emp = await trx.selectFrom("employees").where("id", "=", employeeId).select(["company_id"]).executeTakeFirst();
+    if (!emp) throw new Error("employee not found");
+    await trx
+      .insertInto("agent_profiles")
+      .values({ employee_id: employeeId, [field]: value, updated_at: new Date().toISOString() } as never)
+      .onConflict((oc) => oc.column("employee_id").doUpdateSet({ [field]: value, updated_at: new Date().toISOString() } as never))
+      .execute();
+    await emit({ companyId: emp.company_id, type: "agentProfile.updated", subjectId: employeeId, actor: { kind: "user" }, payload: { field } });
+  });
+}
