@@ -5,10 +5,11 @@ import { invokeTool } from "../tools/registry";
 import type { ToolContext } from "../tools/types";
 import { MEMORY_KINDS } from "../tools/builtin/memory";
 
-export const MEMORY_WRITE_MCP_SERVER_NAME = "cofounder";
+/** Shared by every in-process agent tool (memory.write, message.send, ...) — one MCP server, several tools. */
+export const AGENT_TOOLS_MCP_SERVER_NAME = "cofounder";
 export const MEMORY_WRITE_MCP_TOOL_NAME = "memory_write";
 /** MCP tool names surface to the model as `mcp__<serverName>__<toolName>`. */
-export const MEMORY_WRITE_ALLOWED_TOOL = `mcp__${MEMORY_WRITE_MCP_SERVER_NAME}__${MEMORY_WRITE_MCP_TOOL_NAME}`;
+export const MEMORY_WRITE_ALLOWED_TOOL = `mcp__${AGENT_TOOLS_MCP_SERVER_NAME}__${MEMORY_WRITE_MCP_TOOL_NAME}`;
 
 /**
  * Builds the in-process MCP tool definition for `memory.write`, routed

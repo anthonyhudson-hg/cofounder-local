@@ -88,11 +88,11 @@ export class CodexProvider implements AgentProvider {
       ? `${opts.systemPrompt}\n\n---\n\n${opts.prompt}`
       : opts.prompt;
 
-    // opts.memoryWriteTool (see providers/types.ts) is deliberately unused here:
+    // opts.agentTools (see providers/types.ts) is deliberately unused here:
     // `@openai/codex-sdk`'s ThreadOptions has no mechanism for the calling
     // process to register a custom tool, so Codex-provider turns never get the
-    // in-process memory.write tool ClaudeProvider wires in — the tool is
-    // Claude-only until/unless the SDK adds an equivalent surface.
+    // in-process memory.write/message.send tools ClaudeProvider wires in — those
+    // are Claude-only until/unless the SDK adds an equivalent surface.
     //
     // NOTE: this does NOT actually disable Codex's tools — `@openai/codex-sdk`'s
     // `ThreadOptions` has no option to disable the model's built-in exec/file/patch

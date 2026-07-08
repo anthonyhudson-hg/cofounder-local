@@ -17,6 +17,7 @@ import { resolveApproval } from "../domains/approvals/service";
 import { storeSecret, getSecret } from "../secrets/vault";
 import { companyWorkspaceRoot } from "../connectors/workspace";
 import { buildMemoryWriteToolDef } from "../providers/claudeMemoryTool";
+import { buildMessageSendToolDef } from "../providers/claudeMessageSendTool";
 
 function freshCtx(): RuntimeContext {
   const p = path.join(os.tmpdir(), `cf-test-${randomUUID()}.db`);
@@ -130,6 +131,49 @@ test("capability gate: 'suggest' autonomy downgrades an otherwise-allowed write 
   await ctx.db.destroy();
 });
 
+test("message.send tool: only posts where the calling employee is a CURRENT member, persists correctly, and downgrades to approval when the grant is capped", async () => {
+  const { createEmployee, toggleMembership } = await import("../domains/employees/service");
+  const { createChannel } = await import("../domains/conversations/service");
+  const ctx = freshCtx();
+  const { id: companyId, generalConversationId } = await createCompany(ctx, { name: "A" }, { kind: "user" });
+
+  const alice = await createEmployee(ctx, { companyId, name: "Alice" });
+  // A second channel Alice is NOT a member of, to prove membership (not just
+  // "a channel with this name exists") is what gates access.
+  const { conversationId: otherChannelId } = await createChannel(ctx, companyId, "secret-room");
+
+  await toggleMembership(ctx, generalConversationId, alice.employeeId);
+  await grantCapability(ctx, companyId, alice.employeeId, "tool:messaging", "write-internal");
+  const tc = { ctx, companyId, employeeId: alice.employeeId };
+
+  // Not a member of "secret-room" -> denied, with a helpful message listing
+  // what Alice actually CAN post to (not a silent no-op, not a generic error).
+  await assert.rejects(
+    () => invokeTool(tc, "message.send", { conversationName: "secret-room", text: "sneaking in" }),
+    /don't have access.*secret-room.*general/s,
+  );
+  const leaked = await ctx.db.selectFrom("messages").where("conversation_id", "=", otherChannelId).selectAll().execute();
+  assert.equal(leaked.length, 0, "the denied post never touched the DB");
+
+  // A real post, accepting a leading "#" the way a model might naturally write it.
+  const posted = await invokeTool(tc, "message.send", { conversationName: "#general", text: "Happy birthday!" });
+  assert.equal(posted.status, "ok");
+  const row = await ctx.db.selectFrom("messages").where("conversation_id", "=", generalConversationId).where("content", "=", "Happy birthday!").selectAll().executeTakeFirstOrThrow();
+  assert.equal(row.role, "assistant");
+  assert.equal(row.author_employee_id, alice.employeeId);
+  assert.equal(row.status, "complete");
+
+  // Downgrade the grant to read-only -> write-internal now exceeds it -> queued
+  // for approval instead of posting, same as memory.write's existing pattern.
+  await grantCapability(ctx, companyId, alice.employeeId, "tool:messaging", "read");
+  const gated = await invokeTool(tc, "message.send", { conversationName: "general", text: "should be gated" });
+  assert.equal(gated.status, "approval");
+  const notPosted = await ctx.db.selectFrom("messages").where("content", "=", "should be gated").selectAll().execute();
+  assert.equal(notPosted.length, 0, "an approval-gated post doesn't happen until approved");
+
+  await ctx.db.destroy();
+});
+
 test("capability grants: list/grant/revoke round-trip, cross-company leakage is rejected, revoke falls back to deny, and each mutation emits an event", async () => {
   const { listGrants, revokeCapability } = await import("../tools/capability");
   const ctx = freshCtx();
@@ -177,12 +221,14 @@ test("capability grants: list/grant/revoke round-trip, cross-company leakage is 
   await ctx.db.destroy();
 });
 
-test("listScopes: reflects exactly the tools registered today (tool:memory, connector:github)", async () => {
+test("listScopes: reflects exactly the tools registered today (tool:memory, tool:messaging, connector:github)", async () => {
   const { listScopes } = await import("../tools/registry");
   const scopes = listScopes();
   const byScope = Object.fromEntries(scopes.map((s) => [s.scope, s]));
   assert.equal(byScope["tool:memory"].maxEffect, "write-internal", "memory.write outranks memory.read");
   assert.deepEqual(new Set(byScope["tool:memory"].tools), new Set(["memory.write", "memory.read"]));
+  assert.equal(byScope["tool:messaging"].maxEffect, "write-internal");
+  assert.deepEqual(new Set(byScope["tool:messaging"].tools), new Set(["message.send"]));
   assert.equal(byScope["connector:github"].maxEffect, "external-write");
 });
 
@@ -842,6 +888,45 @@ test("claudeMemoryTool: memory_write MCP handler goes through the real capabilit
   assert.equal((ok.content[0] as { text: string }).text, "Saved.");
   const row = await ctx.db.selectFrom("agent_memory").where("mem_key", "=", "k3").selectAll().executeTakeFirstOrThrow();
   assert.equal(row.value, "v3");
+
+  await ctx.db.destroy();
+});
+
+test("claudeMessageSendTool: message_send MCP handler goes through the real capability + membership gates (deny/approval/allow)", async () => {
+  const ctx = freshCtx();
+  // The seeded Chief of Staff is already a #general member (see companies/service.ts's seedDefaults).
+  const { id: companyId, cosEmployeeId: emp, generalConversationId } = await createCompany(ctx, { name: "Acme" }, { kind: "user" });
+
+  const stubToolFn = ((
+    _name: string,
+    _desc: string,
+    _schema: unknown,
+    handler: (args: unknown, extra: unknown) => Promise<unknown>,
+  ) => ({ handler })) as unknown as Parameters<typeof buildMessageSendToolDef>[0];
+
+  const def = buildMessageSendToolDef(stubToolFn, { ctx, companyId, employeeId: emp });
+
+  // No grant at all -> capability denied.
+  const denied = await def.handler({ conversationName: "general", text: "hi" }, {});
+  assert.equal(denied.isError, true);
+  assert.match((denied.content[0] as { text: string }).text, /Could not post that message/);
+
+  // Grant capped at "read" -> write-internal exceeds it -> queued for approval,
+  // not silently posted.
+  await grantCapability(ctx, companyId, emp, "tool:messaging", "read");
+  const pending = await def.handler({ conversationName: "general", text: "hi" }, {});
+  assert.equal(pending.isError, true);
+  assert.match((pending.content[0] as { text: string }).text, /queued/);
+  assert.match((pending.content[0] as { text: string }).text, /has NOT been posted yet/);
+
+  // Grant covers write-internal -> actually posts.
+  await grantCapability(ctx, companyId, emp, "tool:messaging", "write-internal");
+  const ok = await def.handler({ conversationName: "general", text: "Real post" }, {});
+  assert.equal(ok.isError, undefined);
+  assert.match((ok.content[0] as { text: string }).text, /Posted to #general/);
+  const row = await ctx.db.selectFrom("messages").where("content", "=", "Real post").selectAll().executeTakeFirstOrThrow();
+  assert.equal(row.author_employee_id, emp);
+  assert.equal(row.conversation_id, generalConversationId);
 
   await ctx.db.destroy();
 });

@@ -33,17 +33,23 @@ export interface RunTurnOptions {
    */
   timeoutMs?: number;
   /**
-   * When present, exposes an in-process `memory.write` tool for this turn,
-   * gated through the same capability/approval machinery as `tool.invoke`
-   * (tools/registry.ts's `invokeTool`) — an agent with no standing grant gets
-   * a clean "capability denied" tool result, same as the direct IPC path.
-   * Claude-only: `@openai/codex-sdk` has no mechanism for the calling process
-   * to register custom tools, so CodexProvider ignores this field entirely
-   * (see providers/codex.ts). Deliberately scoped to memory.write only, not
-   * the full tool registry — every other tool stays reachable only via
+   * When present, exposes this turn's in-process tool set — currently
+   * memory.write and message.send — each gated through the same
+   * capability/approval machinery as `tool.invoke` (tools/registry.ts's
+   * `invokeTool`); an agent with no standing grant on a given tool's scope
+   * gets a clean "capability denied" result for that tool specifically, same
+   * as the direct IPC path. A single field rather than one per tool: every
+   * in-process tool needs the exact same {ctx, companyId, employeeId,
+   * correlationId} to invoke through the gate, so there's nothing tool-
+   * specific to parameterize here — see providers/claude.ts for which tools
+   * actually get wired into the SDK call from this. Claude-only:
+   * `@openai/codex-sdk` has no mechanism for the calling process to register
+   * custom tools, so CodexProvider ignores this field entirely (see
+   * providers/codex.ts). Still deliberately scoped to a curated set, not the
+   * full tool registry — every other tool stays reachable only via
    * `command:tool.invoke`.
    */
-  memoryWriteTool?: ToolContext;
+  agentTools?: ToolContext;
   /**
    * Lets a caller cancel an in-flight turn from outside (a user pressing
    * "Stop" — see runtime/turnRegistry.ts). Distinct from `timeoutMs`: both

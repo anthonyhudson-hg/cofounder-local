@@ -570,7 +570,7 @@ export async function sendMessage(
           systemPrompt,
           prompt: promptWithNotices,
           resumeSessionId,
-          memoryWriteTool: { ctx, companyId: input.companyId, employeeId: employee.id, correlationId: input.correlationId ?? null },
+          agentTools: { ctx, companyId: input.companyId, employeeId: employee.id, correlationId: input.correlationId ?? null },
           abortSignal,
         }),
         onChunk,
@@ -781,63 +781,57 @@ export interface SendChannelMessageResult {
 }
 
 /**
- * The channel turn loop: relevance-gates every member (an @mention always
- * bypasses the gate), then runs each responder's turn in parallel, parsing its
- * control-block for whether to post text, which thread/message to reply to,
- * and which reactions to add. `relevanceProviderOverride`/`responderProviderOverride`
- * are for tests.
+ * Relevance-gates every member of a conversation against a trigger message
+ * (an @mention always bypasses the gate), then runs each responder's turn in
+ * parallel, parsing its control-block for whether to post text, which
+ * thread/message to reply to, and which reactions to add.
  *
- * Streams the same way a DM does — `sink` is required, not optional, so this
- * can never silently regress back to batch-only. There's no message row yet
+ * Factored out of sendChannelMessage so a channel message can originate from
+ * either the user (sendChannelMessage) or an employee posting proactively
+ * via the message.send tool (tools/builtin/messaging.ts) — both are "a new
+ * message landed in this conversation, see who should respond" and were
+ * never meant to be two different mechanisms. `excludeEmployeeId` is for the
+ * latter case: an employee doesn't get relevance-gated against its own post.
+ * `relevanceProviderOverride`/`responderProviderOverride` are for tests.
+ *
+ * `sink` streams live the same way a DM does. There's no message row yet
  * when a responder starts (whether it posts at all depends on parsing its
  * own control block once the turn finishes), so deltas are keyed by
  * `employeeId` rather than a message id: "channelText"/"channelTool" carry
  * live content the same shape as a DM's "text"/"tool" channels, and
  * "channelDone" tells the client that responder settled (whether or not it
  * actually posted) so its live-typing preview can be cleared immediately
- * instead of waiting for the whole batch.
+ * instead of waiting for the whole batch. A tool-triggered post has no live
+ * client to stream to — callers without one pass a no-op sink.
  */
-export async function sendChannelMessage(
+export async function runChannelResponders(
   ctx: RuntimeContext,
-  input: SendChannelMessageInput,
+  companyId: string,
+  conversationId: string,
+  triggerMessageId: string,
+  triggerText: string,
   sink: DeltaSink,
-  relevanceProviderOverride?: AgentProvider,
-  responderProviderOverride?: AgentProvider,
-): Promise<SendChannelMessageResult> {
-  await assertConversationInCompany(ctx, input.companyId, input.conversationId);
-
-  const conv = await ctx.db.selectFrom("conversations").where("id", "=", input.conversationId).select(["name"]).executeTakeFirstOrThrow();
-  const company = await ctx.db.selectFrom("companies").where("id", "=", input.companyId).select(["profile", "system_prompt"]).executeTakeFirstOrThrow();
+  options: {
+    excludeEmployeeId?: string;
+    correlationId?: string | null;
+    relevanceProviderOverride?: AgentProvider;
+    responderProviderOverride?: AgentProvider;
+  } = {},
+): Promise<ChannelResponderOutcome[]> {
+  const conv = await ctx.db.selectFrom("conversations").where("id", "=", conversationId).select(["name"]).executeTakeFirstOrThrow();
+  const company = await ctx.db.selectFrom("companies").where("id", "=", companyId).select(["profile", "system_prompt"]).executeTakeFirstOrThrow();
   const { userFullName } = await getUserProfile(ctx);
-  const members = await listChannelMembers(ctx, input.conversationId);
+  const allMembers = await listChannelMembers(ctx, conversationId);
+  const members = options.excludeEmployeeId ? allMembers.filter((m) => m.id !== options.excludeEmployeeId) : allMembers;
 
-  // 1. persist the user message (optionally inside an existing thread)
-  const userMessageId = randomUUID();
-  const userThreadRootId = input.replyTo ? input.replyTo.threadRootId ?? input.replyTo.messageId : null;
-  await mutate(ctx, async (trx, emit) => {
-    await trx
-      .insertInto("messages")
-      .values({
-        id: userMessageId,
-        conversation_id: input.conversationId,
-        role: "user",
-        content: input.text,
-        status: "complete",
-        thread_root_id: userThreadRootId,
-        reply_to_message_id: input.replyTo?.messageId ?? null,
-      })
-      .execute();
-    await emit({ companyId: input.companyId, type: "message.created", subjectId: userMessageId, actor: { kind: "user" }, payload: { role: "user", conversationId: input.conversationId } });
-  });
+  if (members.length === 0) return [];
 
-  if (members.length === 0) return { userMessageId, responders: [] };
-
-  // 2. gather channel context: open threads, recent messages (for reactions),
+  // 1. gather channel context: open threads, recent messages (for reactions),
   // and every member's display name (needed for identity blocks + @mentions).
-  const openThreadRows = await openThreadRoots(ctx, input.conversationId, 10);
+  const openThreadRows = await openThreadRoots(ctx, conversationId, 10);
   const openThreads = openThreadRows.map((r) => ({ id: r.id, preview: r.content.slice(0, 60) }));
 
-  const recentRows = await recentMessages(ctx, input.conversationId, 15);
+  const recentRows = await recentMessages(ctx, conversationId, 15);
   const authorNameCache = new Map<string, string>();
   const reactionTargets: { id: string; author: string; preview: string }[] = [];
   for (const r of recentRows) {
@@ -851,18 +845,18 @@ export async function sendChannelMessage(
   }
 
   const memberNames = new Map<string, string>();
-  for (const m of members) {
+  for (const m of allMembers) {
     memberNames.set(m.id, (await employeeDisplayName(ctx, m.id)) ?? "Employee");
   }
 
-  // 3. relevance gate: an @mention always responds and bypasses the gate; with
+  // 2. relevance gate: an @mention always responds and bypasses the gate; with
   // no mentions, every member goes through the cheap Claude relevance check.
   const memberTargets: MentionTarget[] = members
     .map((m) => ({ type: "employee" as const, conversationId: m.conversation_id, label: memberNames.get(m.id) ?? "" }))
     .filter((t) => t.label);
-  const mentionedConvIds = new Set(findMentions(input.text, memberTargets).map((x) => x.target.conversationId));
+  const mentionedConvIds = new Set(findMentions(triggerText, memberTargets).map((x) => x.target.conversationId));
   const hasMentions = mentionedConvIds.size > 0;
-  const relevanceProvider = relevanceProviderOverride ?? getProvider("claude");
+  const relevanceProvider = options.relevanceProviderOverride ?? getProvider("claude");
 
   const relevanceResults = await Promise.all(
     members.map(async (member) => {
@@ -875,13 +869,13 @@ export async function sendChannelMessage(
       const identityBlock = buildIdentityBlock(memberNames.get(member.id) ?? "Employee", member, managerName);
       const responsibilityRows = await listResponsibilities(ctx, member.id);
       const employeeContext = `${identityBlock}\nMission: ${member.mission}\nResponsibilities: ${responsibilityRows.map((r) => r.text).join("; ") || "(none listed)"}`;
-      const { respond, reason } = await checkMemberRelevance(relevanceProvider, employeeContext, conv.name, input.text);
+      const { respond, reason } = await checkMemberRelevance(relevanceProvider, employeeContext, conv.name, triggerText);
       return { member, respond, reason };
     }),
   );
 
   await Promise.all(
-    relevanceResults.map(({ member, respond, reason }) => insertRelevanceCheck(ctx, userMessageId, member.id, respond ? "respond" : "skip", reason)),
+    relevanceResults.map(({ member, respond, reason }) => insertRelevanceCheck(ctx, triggerMessageId, member.id, respond ? "respond" : "skip", reason)),
   );
 
   const relevanceMeta = relevanceResults.map((r) => ({
@@ -892,11 +886,11 @@ export async function sendChannelMessage(
 
   const responders = relevanceResults.filter((r) => r.respond).map((r) => r.member);
 
-  // 4. run every responder's turn in parallel.
+  // 3. run every responder's turn in parallel.
   const outcomes = await Promise.all(
     responders.map(async (member): Promise<ChannelResponderOutcome> => {
       const providerName = modelProvider(member.default_model);
-      const session = await getAgentSession(ctx, input.conversationId, member.id);
+      const session = await getAgentSession(ctx, conversationId, member.id);
       const storedProvider = session?.session_provider ?? "claude";
       const resumeSessionId = storedProvider === providerName ? session?.session_id ?? null : null;
 
@@ -918,10 +912,10 @@ export async function sendChannelMessage(
 
       const rawNotices = await consumeReactionNotices(ctx, member.id, userFullName);
       const { notices, block: noticesBlock } = formatReactionNoticesForPrompt(rawNotices);
-      const promptWithNotices = noticesBlock ? `${noticesBlock}\n\n${input.text}` : input.text;
+      const promptWithNotices = noticesBlock ? `${noticesBlock}\n\n${triggerText}` : triggerText;
 
       try {
-        const provider = responderProviderOverride ?? getProvider(providerName);
+        const provider = options.responderProviderOverride ?? getProvider(providerName);
         let fullText = "";
         const onChunk = (chunk: TurnChunk) => {
           if (chunk.kind === "text") {
@@ -941,7 +935,7 @@ export async function sendChannelMessage(
               systemPrompt,
               prompt: promptWithNotices,
               resumeSessionId: resume,
-              memoryWriteTool: { ctx, companyId: input.companyId, employeeId: member.id, correlationId: input.correlationId ?? null },
+              agentTools: { ctx, companyId, employeeId: member.id, correlationId: options.correlationId ?? null },
               abortSignal,
             }),
             onChunk,
@@ -951,7 +945,7 @@ export async function sendChannelMessage(
         const { control, text } = parseChannelControl(fullText);
 
         if (result.sessionId) {
-          await upsertAgentSession(ctx, input.conversationId, member.id, result.sessionId, providerName);
+          await upsertAgentSession(ctx, conversationId, member.id, result.sessionId, providerName);
         }
         for (const r of control.reactions) {
           await addReaction(ctx, r.messageId, r.emoji, member.id);
@@ -983,7 +977,7 @@ export async function sendChannelMessage(
 
           await insertChannelAssistantMessage(ctx, {
             id: randomUUID(),
-            conversationId: input.conversationId,
+            conversationId,
             content: text.trim(),
             model: member.default_model,
             effort: member.default_effort,
@@ -1013,7 +1007,7 @@ export async function sendChannelMessage(
         // (session upsert, reactions, message insert) throwing — mirrors the
         // client's catch-and-post-error-message behavior (report §1.2).
         const message = err instanceof Error ? err.message : String(err);
-        await insertErrorMessage(ctx, { id: randomUUID(), conversationId: input.conversationId, errorMessage: message, authorEmployeeId: member.id }).catch(() => {});
+        await insertErrorMessage(ctx, { id: randomUUID(), conversationId, errorMessage: message, authorEmployeeId: member.id }).catch(() => {});
         return { employeeId: member.id, respond: true, posted: false, error: message };
       }
     }),
@@ -1021,5 +1015,49 @@ export async function sendChannelMessage(
 
   const skipped: ChannelResponderOutcome[] = relevanceResults.filter((r) => !r.respond).map((r) => ({ employeeId: r.member.id, respond: false, posted: false }));
 
-  return { userMessageId, responders: [...outcomes, ...skipped] };
+  return [...outcomes, ...skipped];
+}
+
+/**
+ * The user-initiated entry point: persists the user's message, then runs
+ * runChannelResponders against it. sendMessage's DM equivalent and this used
+ * to duplicate the entire relevance/responder mechanism (see
+ * runChannelResponders's doc comment) — this is now just "persist, then
+ * delegate."
+ */
+export async function sendChannelMessage(
+  ctx: RuntimeContext,
+  input: SendChannelMessageInput,
+  sink: DeltaSink,
+  relevanceProviderOverride?: AgentProvider,
+  responderProviderOverride?: AgentProvider,
+): Promise<SendChannelMessageResult> {
+  await assertConversationInCompany(ctx, input.companyId, input.conversationId);
+
+  // persist the user message (optionally inside an existing thread)
+  const userMessageId = randomUUID();
+  const userThreadRootId = input.replyTo ? input.replyTo.threadRootId ?? input.replyTo.messageId : null;
+  await mutate(ctx, async (trx, emit) => {
+    await trx
+      .insertInto("messages")
+      .values({
+        id: userMessageId,
+        conversation_id: input.conversationId,
+        role: "user",
+        content: input.text,
+        status: "complete",
+        thread_root_id: userThreadRootId,
+        reply_to_message_id: input.replyTo?.messageId ?? null,
+      })
+      .execute();
+    await emit({ companyId: input.companyId, type: "message.created", subjectId: userMessageId, actor: { kind: "user" }, payload: { role: "user", conversationId: input.conversationId } });
+  });
+
+  const responders = await runChannelResponders(ctx, input.companyId, input.conversationId, userMessageId, input.text, sink, {
+    correlationId: input.correlationId,
+    relevanceProviderOverride,
+    responderProviderOverride,
+  });
+
+  return { userMessageId, responders };
 }

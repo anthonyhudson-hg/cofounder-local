@@ -1,6 +1,7 @@
 import type { query } from "@anthropic-ai/claude-agent-sdk";
 import { AgentProvider, RunTurnOptions, TurnCancelledError, TurnChunk, TurnResult, UsagePayload, ZERO_USAGE } from "./types";
-import { buildMemoryWriteToolDef, MEMORY_WRITE_ALLOWED_TOOL, MEMORY_WRITE_MCP_SERVER_NAME } from "./claudeMemoryTool";
+import { buildMemoryWriteToolDef, MEMORY_WRITE_ALLOWED_TOOL, AGENT_TOOLS_MCP_SERVER_NAME } from "./claudeMemoryTool";
+import { buildMessageSendToolDef, MESSAGE_SEND_ALLOWED_TOOL } from "./claudeMessageSendTool";
 
 /**
  * Claude Code / Claude Agent SDK provider. This is the original Chief of Staff
@@ -63,16 +64,16 @@ export class ClaudeProvider implements AgentProvider {
       else opts.abortSignal.addEventListener("abort", onExternalAbort);
     }
 
-    // Only wire the memory-write tool in (and thus only allow it) when the
-    // caller opted in — turns without a memoryWriteTool (e.g. the internal
+    // Only wire the agent tool set in (and thus only allow it) when the
+    // caller opted in — turns without agentTools (e.g. the internal
     // channel-relevance check) run exactly as before, with zero tools.
-    const toolOptions = opts.memoryWriteTool
+    const toolOptions = opts.agentTools
       ? {
-          allowedTools: [MEMORY_WRITE_ALLOWED_TOOL],
+          allowedTools: [MEMORY_WRITE_ALLOWED_TOOL, MESSAGE_SEND_ALLOWED_TOOL],
           mcpServers: {
-            [MEMORY_WRITE_MCP_SERVER_NAME]: createSdkMcpServer({
-              name: MEMORY_WRITE_MCP_SERVER_NAME,
-              tools: [buildMemoryWriteToolDef(tool, opts.memoryWriteTool)],
+            [AGENT_TOOLS_MCP_SERVER_NAME]: createSdkMcpServer({
+              name: AGENT_TOOLS_MCP_SERVER_NAME,
+              tools: [buildMemoryWriteToolDef(tool, opts.agentTools), buildMessageSendToolDef(tool, opts.agentTools)],
             }),
           },
         }

@@ -15,6 +15,7 @@ import { invokeTool, runToolApproved, listScopes } from "../tools/registry";
 import { listGrants, grantCapability, revokeCapability } from "../tools/capability";
 import type { Effect } from "../tools/types";
 import { registerMemoryTools } from "../tools/builtin/memory";
+import { registerMessagingTools } from "../tools/builtin/messaging";
 import { registerGithubConnector } from "../connectors/github";
 import { cancelTurn } from "../runtime/turnRegistry";
 import {
@@ -84,6 +85,7 @@ import type { ToolContext } from "../tools/types";
  */
 
 registerMemoryTools();
+registerMessagingTools();
 registerGithubConnector();
 
 register("command:company.create", async (ctx, inbound) => {
