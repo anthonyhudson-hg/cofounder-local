@@ -137,6 +137,7 @@ function MessageRowImpl({
             key={emoji}
             className="hover-toolbar-btn reaction-pick"
             title={`React ${emoji}`}
+            aria-label={`React ${emoji}`}
             onClick={() => onToggleReaction(m.id, emoji)}
           >
             <Emoji emoji={emoji} size={17} />
@@ -146,6 +147,7 @@ function MessageRowImpl({
           <button
             className="hover-toolbar-btn reaction-pick"
             title="More reactions"
+            aria-label="More reactions"
             onClick={() => setPickerOpen((v) => !v)}
           >
             <Plus />
@@ -155,7 +157,12 @@ function MessageRowImpl({
           )}
         </div>
         {onReply && (
-          <button className="hover-toolbar-btn" title="Reply in thread" onClick={() => onReply(m)}>
+          <button
+            className="hover-toolbar-btn"
+            title="Reply in thread"
+            aria-label="Reply in thread"
+            onClick={() => onReply(m)}
+          >
             <ArrowBendUpLeft />
           </button>
         )}
@@ -163,6 +170,7 @@ function MessageRowImpl({
           <button
             className="hover-toolbar-btn kebab-btn"
             title="More actions"
+            aria-label="More actions"
             onClick={() => setMenuOpen((v) => !v)}
           >
             <DotsThreeVertical weight="bold" />

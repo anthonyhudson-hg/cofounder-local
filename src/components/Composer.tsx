@@ -113,6 +113,21 @@ export function Composer({
   useLayoutEffect(() => {
     mentionOptionsCountRef.current = mentionOptions.length;
   });
+  const mentionOptionsRef = useRef<MentionTarget[]>([]);
+  useLayoutEffect(() => {
+    mentionOptionsRef.current = mentionOptions;
+  });
+
+  // Highlighted row in the autocomplete dropdown, for keyboard selection — previously
+  // there was no keyboard path to accept a mention at all (report §5.4).
+  const [highlightedIndex, setHighlightedIndex] = useState(0);
+  const highlightedIndexRef = useRef(0);
+  useLayoutEffect(() => {
+    highlightedIndexRef.current = highlightedIndex;
+  });
+  useEffect(() => {
+    setHighlightedIndex(0);
+  }, [mentionQuery?.from, mentionQuery?.to, mentionQuery?.term]);
 
   const disabledRef = useRef(disabled);
   useLayoutEffect(() => {
@@ -130,8 +145,27 @@ export function Composer({
       editorProps: {
         attributes: { class: "composer-editor" },
         handleKeyDown: (_view, event) => {
+          if (mentionOptionsCountRef.current > 0) {
+            if (event.key === "ArrowDown") {
+              event.preventDefault();
+              setHighlightedIndex((i) => Math.min(i + 1, mentionOptionsCountRef.current - 1));
+              return true;
+            }
+            if (event.key === "ArrowUp") {
+              event.preventDefault();
+              setHighlightedIndex((i) => Math.max(i - 1, 0));
+              return true;
+            }
+            if ((event.key === "Enter" || event.key === "Tab") && !event.shiftKey) {
+              // Previously Enter was let through to insert a newline whenever the
+              // dropdown was open, with no way to actually accept a suggestion from
+              // the keyboard (report §5.4).
+              event.preventDefault();
+              pickHighlightedRef.current();
+              return true;
+            }
+          }
           if (event.key === "Enter" && !event.shiftKey && !event.altKey) {
-            if (mentionOptionsCountRef.current > 0) return false;
             event.preventDefault();
             submitRef.current();
             return true;
@@ -151,7 +185,10 @@ export function Composer({
   const detectMentionRef = useRef((editor: NonNullable<ReturnType<typeof useEditor>>) => {
     const { from } = editor.state.selection;
     const textBefore = editor.state.doc.textBetween(0, from, "\n");
-    const match = textBefore.match(/(^|\s)([@#])(\w*)$/);
+    // `\w*` alone can't include spaces, so autocomplete broke the instant a space was
+    // typed after the first token of a multi-word name (e.g. "Alex Chen") — allow up
+    // to 3 additional space-separated words (report §5.4).
+    const match = textBefore.match(/(^|\s)([@#])(\w*(?:\s\w+){0,3})$/);
     if (match && mentionTargetsRef.current) {
       const term = match[3];
       const prefix = match[2] as "@" | "#";
@@ -199,6 +236,17 @@ export function Composer({
     setMentionQuery(null);
   };
 
+  // Reached from handleKeyDown above, which TipTap only recreates when `placeholder`
+  // changes — everything it touches (mentionOptions, highlightedIndex, pickMention)
+  // must be read via a ref to avoid a stale closure, matching submitRef's pattern.
+  const pickHighlightedRef = useRef(() => {});
+  useLayoutEffect(() => {
+    pickHighlightedRef.current = () => {
+      const target = mentionOptionsRef.current[highlightedIndexRef.current];
+      if (target) pickMention(target);
+    };
+  });
+
   return (
     <div className="composer-wrap">
       {replyPreview && (
@@ -219,6 +267,8 @@ export function Composer({
               type="button"
               className={`format-btn ${editor && activeMarks.has(action.isActive) ? "active" : ""}`}
               title={action.label}
+              aria-label={action.label}
+              aria-pressed={!!(editor && activeMarks.has(action.isActive))}
               disabled={!editor || disabled}
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => editor && action.run(editor)}
@@ -230,11 +280,14 @@ export function Composer({
 
         <div className="composer-input-wrap">
           {mentionOptions.length > 0 && (
-            <div className="mention-autocomplete">
-              {mentionOptions.map((t) => (
+            <div className="mention-autocomplete" role="listbox">
+              {mentionOptions.map((t, i) => (
                 <button
                   key={t.conversationId}
-                  className="mention-autocomplete-item"
+                  className={`mention-autocomplete-item ${i === highlightedIndex ? "active" : ""}`}
+                  role="option"
+                  aria-selected={i === highlightedIndex}
+                  onMouseEnter={() => setHighlightedIndex(i)}
                   onClick={() => pickMention(t)}
                 >
                   {mentionQuery?.prefix}

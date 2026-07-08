@@ -446,7 +446,10 @@ Related, same file:
 
 **Fix:** derive thread messages from the same live stream, filtered by `thread_root_id`, instead of a separate reload-based hook.
 
-### 5.4 — `Composer`: mention autocomplete breaks on multi-word names, no keyboard path to accept — MEDIUM
+### 5.4 — `Composer`: mention autocomplete breaks on multi-word names, no keyboard path to accept — MEDIUM — ✅ DONE (core finding); ⚠️ not done (draft persistence)
+
+**Fix applied:** the detection regex now allows up to 3 additional space-separated words after the first (`\w*(?:\s\w+){0,3}`), so multi-word names like "Alex Chen" no longer break autocomplete after the first space. Added keyboard navigation: ArrowUp/ArrowDown move a highlighted index (reset on each new query), Enter/Tab accept the highlighted suggestion when the dropdown is open (falls through to send/newline otherwise). The dropdown now has `role="listbox"`/`role="option"`/`aria-selected`; toolbar buttons got `aria-pressed`/`aria-label`. **Not done:** per-conversation draft persistence across switches — a genuine architectural addition (a draft map keyed by conversation id), left as a follow-up.
+
 **File:** `src/components/Composer.tsx:154, 132-143, 234-243`
 
 `textBefore.match(/(^|\s)([@#])(\w*)$/)` — `\w*` cannot include spaces, so autocomplete for any multi-word name (e.g. "Alex Chen") breaks the instant a space is typed after the first token; users can only ever mention someone by their first name segment. Separately, there is no keyboard selection at all for the dropdown — no arrow-key navigation, Enter is deliberately passed through to insert a newline instead of picking the highlighted (nonexistent) suggestion. A keyboard-only user can never complete a mention via keyboard.
@@ -470,20 +473,23 @@ Doesn't check for a negative offset (`...-05:00`) — such a string has neither 
 
 **Fix:** use a real trailing-offset regex (`[+-]\d{2}:?\d{2}$|Z$`), or normalize timestamps to one format at the source.
 
-### 5.6 — Systemic missing `onError` fallback on avatar `<img>` tags — LOW (consistency bug)
+### 5.6 — Systemic missing `onError` fallback on avatar `<img>` tags — LOW (consistency bug) — ✅ DONE
 **Files:** `src/components/Avatar.tsx:11`, `src/components/CompanySwitcher.tsx:16`
 
 `Emoji.tsx` already establishes the correct pattern (`onError={() => setFailed(true)}` falling back to a native glyph) elsewhere in the same directory — `Avatar` and the company glyph don't follow it. A corrupted/truncated avatar data URL (e.g. from an interrupted upload — see the unhandled-rejection bug in §1.2) renders a permanent broken-image icon instead of the initials fallback the code already has a path for.
 
-### 5.7 — Accessibility gaps (grouped, lower severity individually)
-- **`HomeView.tsx:26-34`** — notification toggle (`role="switch"`) has no accessible name (`aria-label`/`aria-labelledby`); screen readers announce only "switch, not checked."
-- **`CompanySwitcher.tsx:79-141`** — trigger has no `aria-haspopup`/`aria-expanded`; dropdown has no `role="menu"`/`role="menuitem"`.
-- **`IconRail.tsx:16-39`** — no `aria-current` on the active nav item; selection is communicated purely visually.
-- **`Sidebar.tsx`** — mobile drawer scrim is a non-focusable `div` with only `onClick`, no `Escape` path (see §1.6); gear/settings icon buttons rely on `title` only, no `aria-label`.
-- **`MessageRow.tsx:118-166`** — hover-only reveal for reaction/reply/menu controls; if implemented via `:hover`-only CSS (not also `:focus-within`), these are entirely unreachable by keyboard. Verify and fix the CSS.
-- General pattern across `TitleBar.tsx`, `ThreadPanel.tsx`, `Sidebar.tsx`: icon-only close/action buttons with `title` but no `aria-label`.
+### 5.7 — Accessibility gaps (grouped, lower severity individually) — ✅ DONE (all six items)
+- **`HomeView.tsx:26-34`** — notification toggle (`role="switch"`) has no accessible name (`aria-label`/`aria-labelledby`); screen readers announce only "switch, not checked." — ✅ DONE.
+- **`CompanySwitcher.tsx:79-141`** — trigger has no `aria-haspopup`/`aria-expanded`; dropdown has no `role="menu"`/`role="menuitem"`. — ✅ DONE (fixed alongside §1.2).
+- **`IconRail.tsx:16-39`** — no `aria-current` on the active nav item; selection is communicated purely visually. — ✅ DONE.
+- **`Sidebar.tsx`** — mobile drawer scrim is a non-focusable `div` with only `onClick`, no `Escape` path (see §1.6); gear/settings icon buttons rely on `title` only, no `aria-label`. — ✅ DONE (fixed alongside §1.2/§1.6).
+- **`MessageRow.tsx:118-166`** — hover-only reveal for reaction/reply/menu controls; if implemented via `:hover`-only CSS (not also `:focus-within`), these are entirely unreachable by keyboard. Verify and fix the CSS. — ✅ DONE: confirmed the CSS was `display:none`-only (which also removes elements from the tab order, so `:focus-within` alone wouldn't have been enough); switched to `opacity`/`pointer-events` so the toolbar stays focusable, and added `:focus-within` alongside `:hover`. Also added `aria-label` to every button in the toolbar.
+- General pattern across `TitleBar.tsx`, `ThreadPanel.tsx`, `Sidebar.tsx`: icon-only close/action buttons with `title` but no `aria-label`. — ✅ DONE.
 
-### 5.8 — Inconsistent auto-save vs. explicit-save models within the same modal — MEDIUM
+### 5.8 — Inconsistent auto-save vs. explicit-save models within the same modal — MEDIUM — ⚠️ PARTIAL (confirm-before-discard done; models not unified)
+
+**Fix applied:** both modals now confirm before discarding (`window.confirm` when `isDirty`) on close-button click, scrim click, and Escape — the highest-severity concrete risk ("zero confirmation" on a prose field a user spent minutes on) is closed. **Not done:** unifying the two persistence models into one (all-immediate or all-explicit) is a real UX redesign decision, not a bug fix — left for the user/product owner to choose, not assumed here.
+
 **Files:** `AppSettingsModal.tsx` (88, 108, 175 vs. 63/67/138-143), `EmployeeSettingsPanel.tsx` (299, 356 vs. 205-207, 128-134, 455)
 
 Avatar/color/manager/channel-membership changes apply immediately on click; name/profile/system-prompt/preamble sit behind an explicit "Save changes" button gated by `isDirty`. The dirty-check and "Unsaved changes" indicator therefore lie by omission — a user can have genuinely unsaved prose edits sitting next to already-persisted manager/channel changes with no way to tell which is which. Worse, clicking the modal's `X` or the outside scrim while `isDirty` is true discards the unsaved half with **zero confirmation** — real risk for the `preamble`/`additional_details` fields a user might spend minutes writing.
@@ -491,14 +497,14 @@ Avatar/color/manager/channel-membership changes apply immediately on click; name
 **Fix:** pick one persistence model per modal; at minimum, intercept close with a confirm when `isDirty`.
 
 ### 5.9 — Minor frontend correctness/UX items
-- **`EmployeeSettingsPanel.tsx:43-45`** — a responsibility row's local-draft reset effect depends only on `[responsibility.id]`, not `.text`; if the canonical text changes upstream while the id is unchanged, the local draft silently diverges.
-- **`EmployeeSettingsPanel.tsx:52`** — no trim/non-empty guard on responsibility text before persisting on blur; a user can save an empty responsibility.
-- **`HireModal.tsx:134-153`** — new-department input fires creation on both blur and Enter; clicking "Next" directly (no Enter) can race the async create, leaving the Next button confusingly disabled.
+- **`EmployeeSettingsPanel.tsx:43-45`** — a responsibility row's local-draft reset effect depends only on `[responsibility.id]`, not `.text`; if the canonical text changes upstream while the id is unchanged, the local draft silently diverges. — ✅ DONE (fixed alongside §4.1): effect now depends on `[responsibility.id, responsibility.text]`.
+- **`EmployeeSettingsPanel.tsx:52`** — no trim/non-empty guard on responsibility text before persisting on blur; a user can save an empty responsibility. — ✅ DONE: `commit()` now resets to the last-saved value instead of persisting an emptied-out responsibility.
+- **`HireModal.tsx:134-153`** — new-department input fires creation on both blur and Enter; clicking "Next" directly (no Enter) can race the async create, leaving the Next button confusingly disabled. — ✅ DONE (fixed alongside §1.2): `canProceed` now stays false while `addingDepartment` is true, forcing an explicit confirm (Enter/checkmark/blur) before Next can be clicked, which fully removes the race instead of trying to win it.
 - **`SearchModal.tsx:41-47`** — no Enter-to-select on the search input, unlike typical quick-switcher UX. — ✅ DONE: Enter now selects the top match.
-- **`useResizableWidth.ts:12-30`** — drag `mousemove`/`mouseup` listeners are only removed on a genuine `mouseup`; if the component unmounts mid-drag, they leak and keep firing `setWidth` on an unmounted component.
-- **`randomUser.ts:13-38`** — `fetchPhotos` trusts `data.results.length === count`; a short response from the API silently produces `photoUrl: undefined` for excess candidates despite the type claiming `string`, surfacing as a confusing downstream fetch error instead of a clear "photo service returned incomplete data."
-- **`avatar.ts:41`**, **`randomUser.ts:15`** — no timeout/`AbortSignal` on `fetch`/`tauriFetch` calls to `randomuser.me`; a hung request blocks candidate/avatar generation indefinitely (same root pattern as §1.1, just external instead of IPC).
-- **`shared/protocol.d.ts:25-41`** — `CommandEnvelope`/`QueryEnvelope` default their generics to plain `string`/`unknown`; there's no `CommandMap`/`QueryMap` mapping command name → payload → response type. Every one of the ~20+ call sites across the hooks layer is trusting an unchecked generic parameter rather than an inferred contract — the client-side mirror of §1.4.
+- **`useResizableWidth.ts:12-30`** — drag `mousemove`/`mouseup` listeners are only removed on a genuine `mouseup`; if the component unmounts mid-drag, they leak and keep firing `setWidth` on an unmounted component. — ✅ DONE: unmount cleanup now removes any still-registered drag listeners.
+- **`randomUser.ts:13-38`** — `fetchPhotos` trusts `data.results.length === count`; a short response from the API silently produces `photoUrl: undefined` for excess candidates despite the type claiming `string`, surfacing as a confusing downstream fetch error instead of a clear "photo service returned incomplete data." — ✅ DONE: throws a clear error on a length mismatch instead of silently producing `undefined` entries.
+- **`avatar.ts:41`**, **`randomUser.ts:15`** — no timeout/`AbortSignal` on `fetch`/`tauriFetch` calls to `randomuser.me`; a hung request blocks candidate/avatar generation indefinitely (same root pattern as §1.1, just external instead of IPC). — ✅ DONE: both now use a 10s `AbortController` timeout.
+- **`shared/protocol.d.ts:25-41`** — `CommandEnvelope`/`QueryEnvelope` default their generics to plain `string`/`unknown`; there's no `CommandMap`/`QueryMap` mapping command name → payload → response type. Every one of the ~20+ call sites across the hooks layer is trusting an unchecked generic parameter rather than an inferred contract — the client-side mirror of §1.4. — ⚠️ NOT DONE: a full typed `CommandMap`/`QueryMap` covering ~40 command/query names is a genuine type-system redesign (and would need to stay in sync with the sidecar's `register.ts` handlers), not a contained fix; left as a follow-up.
 
 ---
 

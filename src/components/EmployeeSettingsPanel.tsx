@@ -94,6 +94,7 @@ function ResponsibilityRow({
       <button
         className="responsibility-remove"
         title="Remove responsibility"
+        aria-label="Remove responsibility"
         onClick={() => onRemove(responsibility.id)}
       >
         <X />
@@ -286,6 +287,7 @@ export function EmployeeSettingsPanel({
               <button
                 className="settings-icon-btn"
                 title="Randomize name"
+                aria-label="Randomize name"
                 onClick={() => setName(randomSillyName(name))}
               >
                 <DiceFive />
@@ -330,7 +332,12 @@ export function EmployeeSettingsPanel({
                   }}
                   onBlur={handleConfirmNewDepartment}
                 />
-                <button className="settings-icon-btn" title="Add department" onClick={handleConfirmNewDepartment}>
+                <button
+                  className="settings-icon-btn"
+                  title="Add department"
+                  aria-label="Add department"
+                  onClick={handleConfirmNewDepartment}
+                >
                   <Check />
                 </button>
               </div>
@@ -463,7 +470,12 @@ export function EmployeeSettingsPanel({
                     }
                   }}
                 />
-                <button className="responsibility-add" title="Add" onClick={handleAddResponsibility}>
+                <button
+                  className="responsibility-add"
+                  title="Add responsibility"
+                  aria-label="Add responsibility"
+                  onClick={handleAddResponsibility}
+                >
                   <Plus />
                 </button>
               </div>

@@ -29,6 +29,7 @@ export function HomeView({ notificationsEnabled, onToggleNotifications }: Props)
             onClick={() => onToggleNotifications(!notificationsEnabled)}
             role="switch"
             aria-checked={!!notificationsEnabled}
+            aria-label="Desktop notifications"
           >
             <span className="home-pref-toggle-knob" />
           </button>

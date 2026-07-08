@@ -166,11 +166,11 @@ export class CodexProvider implements AgentProvider {
         }
       } catch (err) {
         if (abortController.signal.aborted) {
-          throw new Error(`Codex turn timed out after ${opts.timeoutMs}ms`);
+          throw new Error(`Codex turn timed out after ${opts.timeoutMs}ms`, { cause: err });
         }
         const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
         const message = failure ?? (err instanceof Error ? err.message : String(err));
-        throw new Error(code ? `${message} (${code})` : message);
+        throw new Error(code ? `${message} (${code})` : message, { cause: err });
       } finally {
         if (timer) clearTimeout(timer);
       }

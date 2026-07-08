@@ -32,13 +32,33 @@ export function readImageAsResizedDataUrl(file: Blob): Promise<string> {
   });
 }
 
+const FETCH_TIMEOUT_MS = 10_000;
+
 export async function urlToResizedDataUrl(url: string): Promise<string> {
   // Candidate photos come from randomuser.me, which sends no CORS headers on
   // its image paths — the browser's own fetch() is rejected outright ("Failed
   // to fetch") even though the same domain's JSON API allows it. Routing
   // through the Tauri HTTP plugin makes the request from Rust, side-stepping
   // the renderer's CORS enforcement entirely.
-  const res = await tauriFetch(url);
+  //
+  // No timeout previously — a hung request blocked avatar generation
+  // indefinitely with no recovery path (report §5.9).
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  let res: Awaited<ReturnType<typeof tauriFetch>>;
+  try {
+    res = await tauriFetch(url, { signal: controller.signal });
+  } catch (err) {
+    // Reuses the caught error object (message amended) rather than constructing a new
+    // one, so the original error/stack is preserved without needing the ES2022
+    // `Error(message, {cause})` overload this project's ES2020 target lacks.
+    if (controller.signal.aborted && err instanceof Error) {
+      err.message = `Avatar image request timed out: ${err.message}`;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) throw new Error(`Failed to fetch image: ${res.status}`);
   const blob = await res.blob();
   return readImageAsResizedDataUrl(blob);

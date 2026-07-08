@@ -13,12 +13,19 @@ export function TitleBar({ children }: Props) {
 
   useEffect(() => {
     let cancelled = false;
-    appWindow.isMaximized().then((v) => {
-      if (!cancelled) setMaximized(v);
-    });
+    appWindow
+      .isMaximized()
+      .then((v) => {
+        if (!cancelled) setMaximized(v);
+      })
+      .catch(() => {});
     const unlisten = appWindow.onResized(async () => {
-      const v = await appWindow.isMaximized();
-      if (!cancelled) setMaximized(v);
+      try {
+        const v = await appWindow.isMaximized();
+        if (!cancelled) setMaximized(v);
+      } catch {
+        // ignore — local Tauri window API call, not user-actionable
+      }
     });
     return () => {
       cancelled = true;
@@ -27,22 +34,32 @@ export function TitleBar({ children }: Props) {
   }, []);
 
   return (
-    <div className="titlebar" data-tauri-drag-region>
+    <div
+      className="titlebar"
+      data-tauri-drag-region
+      onDoubleClick={() => void appWindow.toggleMaximize()}
+    >
       <div className="titlebar-content" data-tauri-drag-region>
         {children}
       </div>
       <div className="titlebar-controls">
-        <button className="titlebar-btn" title="Minimize" onClick={() => appWindow.minimize()}>
+        <button className="titlebar-btn" title="Minimize" aria-label="Minimize" onClick={() => appWindow.minimize()}>
           <Minus size={14} weight="bold" />
         </button>
         <button
           className="titlebar-btn"
           title={maximized ? "Restore" : "Maximize"}
+          aria-label={maximized ? "Restore" : "Maximize"}
           onClick={() => appWindow.toggleMaximize()}
         >
           <Square size={12} weight="bold" />
         </button>
-        <button className="titlebar-btn titlebar-btn-close" title="Close" onClick={() => appWindow.close()}>
+        <button
+          className="titlebar-btn titlebar-btn-close"
+          title="Close"
+          aria-label="Close window"
+          onClick={() => appWindow.close()}
+        >
           <X size={14} weight="bold" />
         </button>
       </div>

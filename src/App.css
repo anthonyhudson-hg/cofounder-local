@@ -1115,8 +1115,10 @@ body {
   background: #f8f8f8;
 }
 
-.message-row:hover .hover-toolbar {
-  display: flex;
+.message-row:hover .hover-toolbar,
+.message-row:focus-within .hover-toolbar {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .avatar {
@@ -1381,7 +1383,14 @@ body {
 /* ---------- Hover toolbar / kebab menu ---------- */
 
 .hover-toolbar {
-  display: none;
+  /* `display:none` removes an element from the tab order entirely, so a keyboard
+     user could never Tab into these buttons in the first place — :focus-within could
+     then never trigger either, since nothing inside was ever reachable to focus
+     (report §5.7). opacity+pointer-events keeps the buttons focusable while still
+     invisible until hovered/focused. */
+  display: flex;
+  opacity: 0;
+  pointer-events: none;
   position: absolute;
   top: -14px;
   right: 12px;
@@ -2397,7 +2406,8 @@ body {
   color: #1d1c1d;
 }
 
-.mention-autocomplete-item:hover {
+.mention-autocomplete-item:hover,
+.mention-autocomplete-item.active {
   background: #f0eef0;
 }
 
