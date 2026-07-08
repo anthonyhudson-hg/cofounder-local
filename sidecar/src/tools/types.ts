@@ -33,4 +33,19 @@ export interface Tool<Input = unknown, Output = unknown> {
   effect: Effect;
   description: string;
   run(tc: ToolContext, input: Input): Promise<Output>;
+  /**
+   * Optional: enriches the human approval prompt beyond the raw input args — e.g. a
+   * file-change preview for a write action — so a human approval isn't blind to what
+   * the tool will actually do (report §2.2). Called at request time, before approval,
+   * separately from `run`.
+   */
+  describeForApproval?(tc: ToolContext, input: Input): Promise<Record<string, unknown>>;
+  /**
+   * Optional: validates raw tool input before the capability gate/run even see it.
+   * Throws (with a clear message) on malformed input. There was no runtime schema
+   * validation anywhere in this pipeline — tool input arrives as `unknown` off the
+   * wire and would otherwise only fail deep inside `run()` with an opaque low-level
+   * error (report §2.6). Called synchronously; keep it cheap (no I/O).
+   */
+  validateInput?(input: unknown): void;
 }

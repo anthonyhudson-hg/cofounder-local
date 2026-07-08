@@ -14,6 +14,7 @@ import { grantCapability } from "../tools/capability";
 import { invokeTool } from "../tools/registry";
 import { resolveApproval } from "../domains/approvals/service";
 import { storeSecret, getSecret } from "../secrets/vault";
+import { companyWorkspaceRoot } from "../connectors/workspace";
 
 function freshCtx(): RuntimeContext {
   const p = path.join(os.tmpdir(), `cf-test-${randomUUID()}.db`);
@@ -173,8 +174,9 @@ test("PROOF-OF-LIFE: github connector commit through gate + approval + vault", a
   const ctx = freshCtx();
   const { id: companyId, cosEmployeeId: emp } = await createCompany(ctx, { name: "A" }, { kind: "user" });
 
-  // a throwaway git repo to commit into
-  const repo = path.join(os.tmpdir(), `cf-repo-${randomUUID()}`);
+  // a throwaway git repo to commit into — must live inside the company's sandboxed
+  // workspace root; commit_push now rejects any path outside it (report §2.2).
+  const repo = path.join(companyWorkspaceRoot(companyId), `cf-repo-${randomUUID()}`);
   fs.mkdirSync(repo, { recursive: true });
   const g = (args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
   g(["init", "-q"]);
@@ -213,6 +215,40 @@ test("PROOF-OF-LIFE: github connector commit through gate + approval + vault", a
   // the commit is real
   const log = g(["log", "--oneline"]).trim();
   assert.match(log, /agent: initial commit/);
+
+  await ctx.db.destroy();
+});
+
+test("github connector: a cwd outside the company workspace is rejected (report §2.2)", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const ctx = freshCtx();
+  const { id: companyId, cosEmployeeId: emp } = await createCompany(ctx, { name: "A" }, { kind: "user" });
+  await grantCapability(ctx, companyId, emp, "connector:github", "external-write");
+
+  // Anywhere outside this company's own workspace root must be refused, however
+  // "real" a git repo it is — this is the exact exfiltration path §2.2 flagged.
+  const outsideRepo = path.join(os.tmpdir(), `cf-outside-repo-${randomUUID()}`);
+  fs.mkdirSync(outsideRepo, { recursive: true });
+  const g = (args: string[]) => execFileSync("git", args, { cwd: outsideRepo, encoding: "utf8" });
+  g(["init", "-q"]);
+  g(["config", "user.email", "a@b.c"]);
+  g(["config", "user.name", "Test"]);
+  fs.writeFileSync(path.join(outsideRepo, "secret.txt"), "shouldn't be touched");
+
+  await assert.rejects(
+    () => invokeTool({ ctx, companyId, employeeId: emp }, "github.commit_push", { cwd: outsideRepo, message: "x" }),
+    /escapes the company workspace/,
+  );
+  // A traversal attempt against the workspace root must be refused too.
+  await assert.rejects(
+    () =>
+      invokeTool(
+        { ctx, companyId, employeeId: emp },
+        "github.commit_push",
+        { cwd: "../../../etc", message: "x" },
+      ),
+    /escapes the company workspace/,
+  );
 
   await ctx.db.destroy();
 });

@@ -10,7 +10,7 @@ Severity key: **CRITICAL** (data loss / total feature death) · **HIGH** (real, 
 
 1. [x] **DONE** — **Every sidecar/runtime IPC call can hang forever, with zero timeout, anywhere in the stack.** (§1.1)
 2. [x] **DONE** — **The vault's fallback master key gets written to the OS temp directory.** Wipe temp, lose every secret permanently. (§2.1)
-3. **The GitHub tool lets an agent point `git add -A && git push` at any directory on disk and exfiltrate it with a stored PAT**, and the human approval prompt shows raw JSON, not a diff. (§2.2)
+3. [x] **DONE** — **The GitHub tool lets an agent point `git add -A && git push` at any directory on disk and exfiltrate it with a stored PAT**, and the human approval prompt shows raw JSON, not a diff. (§2.2)
 4. [x] **DONE** — **CSP is fully disabled** (`"csp": null`) in an app that renders LLM-generated (and thus prompt-injectable) markdown. (§2.3)
 5. [x] **DONE** — **Manager-cycle validation is cosmetic.** The frontend blocks direct-report cycles only; the backend validates nothing. A 2+ hop cycle (A→C→B→A) is fully achievable and makes employees vanish from the org chart with no error. (§4.1)
 6. **The sidecar/runtime child processes have no crash detection, no restart, and can be orphaned on app exit.** One crash = silently dead AI chat for the rest of the session, surfaced only as a raw broken-pipe error. (§4.2)
@@ -112,7 +112,10 @@ Related, same file:
 - **`vault.ts` MEDIUM — no handling for decryption failure** (22-31, 59-69): `open()`'s `setAuthTag`/`.final()` throws propagate raw out of `getSecret()` with no typed error, instead of a clean "secret unavailable/corrupted" the caller could use to prompt re-entry.
 - **`vault.ts` LOW — perf**: `getMasterKey()` re-fetches from the OS keychain on every single seal/open call (14, 23) instead of caching the resolved key after first read.
 
-### 2.2 — GitHub connector: unrestricted `cwd`, unscoped `git add -A`, PAT push — HIGH
+### 2.2 — GitHub connector: unrestricted `cwd`, unscoped `git add -A`, PAT push — HIGH — ✅ DONE
+
+**Fix applied:** new `sidecar/src/connectors/workspace.ts` resolves and confines every `commit_push` call to a per-company sandboxed directory (`resolveWithinWorkspace`), rejecting any path — absolute or `..`-traversal — that would escape it; verified with a new test proving both an absolute path outside the workspace and a `../../../etc` traversal are refused. `git()` switched from blocking `execFileSync` to async `execFile` with a 30s timeout. The PAT is now passed via a child-process environment variable read by the credential helper at runtime, not embedded in the helper string/argv. `--no-gpg-sign` is no longer forced. A `git status --porcelain` check before committing returns `{committed:false}` cleanly instead of throwing on a no-op. A push failure after a successful commit now throws an error that names the commit sha instead of losing that state. Added `Tool.describeForApproval` (new optional interface method) so the human approval prompt shows a real file-change list instead of raw JSON args, and `Tool.validateInput` (also new) so malformed tool input is rejected before the capability gate/`run()` see it — implemented for both `github.commit_push` and `memory.write`/`memory.read` (§2.6). `registry.ts`'s `invokeTool`/`runToolApproved` also now emit `tool.denied` and `tool.failed` events, closing the audit-trail gaps from §3.4.
+
 **File:** `sidecar/src/connectors/github.ts`
 
 Three compounding problems:
@@ -160,7 +163,10 @@ The comment states Codex agents run "purely for chat (no tools)" via `sandboxMod
 
 **Fix:** confirm whether a newer SDK exposes a genuine tool-disable flag; at minimum use a fresh per-turn `fs.mkdtempSync()` directory instead of the shared temp root, and correct the comment to say "sandboxed and unattended," not "no tools."
 
-### 2.6 — No input schema validation for tool calls, the codebase's own stated "security boundary" — MEDIUM
+### 2.6 — No input schema validation for tool calls, the codebase's own stated "security boundary" — MEDIUM — ✅ DONE
+
+**Fix applied:** added an optional `Tool.validateInput(input)` method to the `Tool` interface (`sidecar/src/tools/types.ts`), called by `invokeTool` before the capability gate/`run()` execute. Implemented for `github.commit_push` and both `memory.write`/`memory.read`.
+
 **File:** `sidecar/src/tools/registry.ts`, `types.ts`, `capability.ts`
 
 `capability.ts`'s own docstring frames this subsystem as "the single capability gate" for what an autonomous agent may do. But nothing validates tool `input: unknown` against any schema before `tool.run()` executes — `domains/register.ts`'s `command:tool.invoke` forwards `payload.input` straight through. Currently client-controlled only, but the framing (`autonomy_level`, standing grants) implies eventual LLM-tool-call-driven invocation, at which point malformed input from a model hitting an unvalidated Kysely insert (e.g. `memory.write`) becomes a real, exploitable gap rather than a hypothetical one.
@@ -192,7 +198,10 @@ If `query()`'s generator completes without ever yielding a `type:"result"` messa
 
 **Fix:** coerce `id` to a safe fallback before constructing any outbound envelope; add the shape validation from §1.4/§2.6 at this same choke point.
 
-### 3.4 — `tool.run()` failures leave a permanently dangling, unresolved audit trail — MEDIUM
+### 3.4 — `tool.run()` failures leave a permanently dangling, unresolved audit trail — MEDIUM — ✅ DONE
+
+**Fix applied:** `invokeTool`/`runToolApproved` now share a `runAndRecord` helper that wraps `tool.run()` in try/catch, emitting a new `tool.failed` event (with the error message and whether it went through approval) before rethrowing. The deny path now emits a new `tool.denied` event before throwing, closing the "most security-relevant case is the one that's invisible in the log" gap.
+
 **File:** `sidecar/src/tools/registry.ts:31-76`
 
 `invokeTool` does three independent, non-atomic `mutate()` transactions: emit `tool.invoked` → `tool.run()` → emit `tool.completed`, with **no try/catch around `tool.run()`**. If the tool throws, `tool.invoked` is already durably committed, there's no `tool.failed` event type, and `tool.completed` never fires — a permanent "invoked but never resolved" gap in the event log, indistinguishable from "still running." Same gap in `runToolApproved` (79-94): a failed approved action leaves the approval record `"approved"` forever with no execution-status signal.
@@ -231,7 +240,7 @@ Neither `ClaudeProvider` nor `CodexProvider` is exercised anywhere — the one c
 - **`codex.ts` LOW** (108-131): loop doesn't `break` after a terminal failure event — wasted work, not incorrect.
 - **`codex.ts` LOW** (133-135): original thrown error's `.code` (e.g. `ENOENT`) is discarded in favor of the event-derived message, making "CLI not installed" indistinguishable from "turn failed."
 - **`providers/index.ts` LOW** (12-17): unrecognized provider strings (`"Codex"` with capital C, trailing whitespace) silently route to Claude with no log — a user could believe they're talking to Codex the whole time.
-- **`memory.ts` LOW/MEDIUM** (60-70): `memory.read` has no limit/pagination — unbounded result set fed back into agent context and token cost.
+- **`memory.ts` LOW/MEDIUM** (60-70): `memory.read` has no limit/pagination — unbounded result set fed back into agent context and token cost. — ✅ DONE: added a `limit` input field (default 200, capped at 1000) and a corresponding `.limit()` on the query.
 - **`capability.ts` LOW**: inconsistent `crypto.randomUUID()` global vs. explicit `node:crypto` import used everywhere else; risks depending on WebCrypto global presence in the eventual bundled `.exe`.
 
 ---

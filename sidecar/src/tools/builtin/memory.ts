@@ -4,6 +4,7 @@ import { registerTool } from "../registry";
 import type { Tool, ToolContext } from "../types";
 
 type MemoryKind = "working" | "long" | "episodic" | "semantic";
+const MEMORY_KINDS: readonly MemoryKind[] = ["working", "long", "episodic", "semantic"];
 
 interface WriteInput {
   key: string;
@@ -13,6 +14,35 @@ interface WriteInput {
 interface ReadInput {
   key?: string;
   kind?: MemoryKind;
+  limit?: number;
+}
+
+// No hard limit previously — a long-lived agent's accumulated memory could return an
+// ever-growing, unbounded result (and token cost) from a single call (report §3.8).
+const DEFAULT_READ_LIMIT = 200;
+const MAX_READ_LIMIT = 1000;
+
+function validateWriteInput(input: unknown): void {
+  if (!input || typeof input !== "object") throw new Error("memory.write: input must be an object");
+  const { key, value, kind } = input as Partial<WriteInput>;
+  if (typeof key !== "string" || !key.trim()) throw new Error("memory.write: 'key' must be a non-empty string");
+  if (typeof value !== "string") throw new Error("memory.write: 'value' must be a string");
+  if (kind !== undefined && !MEMORY_KINDS.includes(kind)) {
+    throw new Error(`memory.write: 'kind' must be one of ${MEMORY_KINDS.join(", ")}`);
+  }
+}
+
+function validateReadInput(input: unknown): void {
+  if (input === undefined || input === null) return;
+  if (typeof input !== "object") throw new Error("memory.read: input must be an object");
+  const { key, kind, limit } = input as Partial<ReadInput>;
+  if (key !== undefined && typeof key !== "string") throw new Error("memory.read: 'key' must be a string");
+  if (kind !== undefined && !MEMORY_KINDS.includes(kind)) {
+    throw new Error(`memory.read: 'kind' must be one of ${MEMORY_KINDS.join(", ")}`);
+  }
+  if (limit !== undefined && (typeof limit !== "number" || !Number.isFinite(limit) || limit <= 0)) {
+    throw new Error("memory.read: 'limit' must be a positive number");
+  }
 }
 
 const memoryWrite: Tool<WriteInput, { ok: true }> = {
@@ -20,6 +50,7 @@ const memoryWrite: Tool<WriteInput, { ok: true }> = {
   scope: "tool:memory",
   effect: "write-internal",
   description: "Persist a durable memory entry (key/value) scoped to this agent.",
+  validateInput: validateWriteInput,
   async run(tc: ToolContext, input: WriteInput) {
     const kind = input.kind ?? "long";
     await mutate(tc.ctx, async (trx, emit) => {
@@ -56,7 +87,8 @@ const memoryRead: Tool<ReadInput, { entries: { key: string; value: string; kind:
   name: "memory.read",
   scope: "tool:memory",
   effect: "read",
-  description: "Read this agent's memory entries, optionally filtered by key/kind.",
+  description: "Read this agent's memory entries, optionally filtered by key/kind, newest first (default limit 200).",
+  validateInput: validateReadInput,
   async run(tc: ToolContext, input: ReadInput) {
     let q = tc.ctx.db
       .selectFrom("agent_memory")
@@ -65,7 +97,8 @@ const memoryRead: Tool<ReadInput, { entries: { key: string; value: string; kind:
       .select(["mem_key", "value", "kind"]);
     if (input.key) q = q.where("mem_key", "=", input.key);
     if (input.kind) q = q.where("kind", "=", input.kind);
-    const rows = await q.orderBy("updated_at", "desc").execute();
+    const limit = Math.min(input.limit ?? DEFAULT_READ_LIMIT, MAX_READ_LIMIT);
+    const rows = await q.orderBy("updated_at", "desc").limit(limit).execute();
     return { entries: rows.map((r) => ({ key: r.mem_key, value: r.value, kind: r.kind })) };
   },
 };
