@@ -1,13 +1,40 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import type { query } from "@anthropic-ai/claude-agent-sdk";
 import { AgentProvider, RunTurnOptions, TurnResult, UsagePayload, ZERO_USAGE } from "./types";
 
 /**
  * Claude Code / Claude Agent SDK provider. This is the original Chief of Staff
  * backend, lifted verbatim behind the AgentProvider interface — its streaming,
  * session, usage and cost semantics are unchanged.
+ *
+ * The SDK ships ESM-only ("type": "module", no CJS entry), so it's loaded via
+ * a genuine dynamic import() (preserved past the CommonJS downlevel via
+ * `new Function`, mirroring providers/codex.ts's identical guard) instead of
+ * a static value import. A plain `import { query } from "..."` here used to
+ * downlevel to a bare `require(...)`, which only "worked" because this dev
+ * machine's Node has unflagged require(ESM) support (Node 22.12+/23+) — a
+ * bundled build's exact Node version shouldn't be a silent precondition for
+ * this provider to function at all.
  */
+const dynamicImport = new Function("specifier", "return import(specifier)") as (
+  specifier: string,
+) => Promise<typeof import("@anthropic-ai/claude-agent-sdk")>;
+
+let queryFnPromise: Promise<typeof query> | null = null;
+function getQuery(): Promise<typeof query> {
+  if (!queryFnPromise) {
+    queryFnPromise = dynamicImport("@anthropic-ai/claude-agent-sdk").then((mod) => mod.query);
+    // Mirrors codex.ts: don't cache a failed import forever — a transient FS
+    // hiccup shouldn't require a full app restart to recover from.
+    queryFnPromise.catch(() => {
+      queryFnPromise = null;
+    });
+  }
+  return queryFnPromise;
+}
+
 export class ClaudeProvider implements AgentProvider {
   async *runTurn(opts: RunTurnOptions): AsyncGenerator<string, TurnResult, void> {
+    const query = await getQuery();
     let sessionId: string | undefined;
     let usage: UsagePayload = { ...ZERO_USAGE };
     let totalCostUsd = 0;
