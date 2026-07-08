@@ -52,4 +52,28 @@ describe("composeSystemPrompt", () => {
     expect(prompt).not.toContain("Mission:");
     expect(prompt.split("\n\n")).toHaveLength(1);
   });
+
+  it("injects personality/communication style/expertise/autonomy when an agent profile is passed", () => {
+    const prompt = composeSystemPrompt(
+      "",
+      "",
+      "You are Ada, Engineer.",
+      { mission: "", preamble: "", additional_details: "" },
+      [],
+      { personality: "Enthusiastic and curious.", communicationStyle: "Casual, lots of emoji.", expertise: ["rust", "distributed systems"], autonomyLevel: "autonomous" },
+    );
+    expect(prompt).toContain("Personality: Enthusiastic and curious.");
+    expect(prompt).toContain("Communication style: Casual, lots of emoji.");
+    expect(prompt).toContain("Areas of expertise: rust, distributed systems");
+    expect(prompt).toContain("Autonomy level: autonomous.");
+  });
+
+  it("stays byte-for-byte free of the profile sections when no agent profile is passed (every pre-existing caller)", () => {
+    const prompt = composeSystemPrompt("", "", "identity", { mission: "", preamble: "", additional_details: "" }, []);
+    expect(prompt).not.toContain("Personality:");
+    expect(prompt).not.toContain("Communication style:");
+    expect(prompt).not.toContain("Areas of expertise:");
+    expect(prompt).not.toContain("Autonomy level:");
+    expect(prompt).not.toContain("undefined");
+  });
 });

@@ -213,3 +213,26 @@ export function modelProvider(id: string | null): Provider {
 
 export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 export type Effort = (typeof EFFORTS)[number];
+
+export const AUTONOMY_LEVELS = ["suggest", "act-with-approval", "autonomous"] as const;
+export type AutonomyLevel = (typeof AUTONOMY_LEVELS)[number];
+
+export const AUTONOMY_LABELS: Record<AutonomyLevel, string> = {
+  suggest: "Suggest",
+  "act-with-approval": "Act with approval",
+  autonomous: "Autonomous",
+};
+
+export const AUTONOMY_HINTS: Record<AutonomyLevel, string> = {
+  suggest: "Proposes actions and waits for your confirmation before doing anything consequential.",
+  "act-with-approval": "Acts directly within its granted permissions; anything beyond that is held for your approval.",
+  autonomous: "Acts independently without pausing to ask, within its granted permissions.",
+};
+
+/** Mirrors sidecar/src/domains/employees/service.ts's AgentProfile shape. */
+export interface AgentProfile {
+  personality: string;
+  communicationStyle: string;
+  expertise: string[];
+  autonomyLevel: AutonomyLevel;
+}

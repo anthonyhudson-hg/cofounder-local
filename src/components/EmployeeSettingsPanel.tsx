@@ -3,7 +3,21 @@ import { useEffect, useRef, useState } from "react";
 import { descendantIds } from "../lib/orgChart";
 import { buildIdentityBlock, composeSystemPrompt, resolveManagerName } from "../lib/promptBuilder";
 import { randomSillyName } from "../lib/sillyNames";
-import { Conversation, EFFORTS, Effort, Employee, MODELS, PROVIDERS, PROVIDER_LABELS, Responsibility } from "../types";
+import {
+  AUTONOMY_HINTS,
+  AUTONOMY_LABELS,
+  AUTONOMY_LEVELS,
+  AutonomyLevel,
+  Conversation,
+  EFFORTS,
+  Effort,
+  Employee,
+  MODELS,
+  PROVIDERS,
+  PROVIDER_LABELS,
+  Responsibility,
+} from "../types";
+import { useAgentProfile } from "../hooks/useAgentProfile";
 import { useChannelMembership } from "../hooks/useChannelMembership";
 import { useDepartments } from "../hooks/useDepartments";
 import { useEscapeToClose } from "../hooks/useEscapeToClose";
@@ -110,6 +124,12 @@ export function EmployeeSettingsPanel({
     useResponsibilities(employee.id);
   const [newResponsibility, setNewResponsibility] = useState("");
 
+  const { profile: agentProfile, loaded: agentProfileLoaded, updateField: updateAgentProfileField } =
+    useAgentProfile(employee.id);
+  const [personality, setPersonality] = useState(agentProfile.personality);
+  const [communicationStyle, setCommunicationStyle] = useState(agentProfile.communicationStyle);
+  const [expertiseText, setExpertiseText] = useState(agentProfile.expertise.join(", "));
+
   useEffect(() => {
     setName(conversation.name);
     setJobTitle(employee.job_title);
@@ -121,6 +141,20 @@ export function EmployeeSettingsPanel({
     setAdditionalDetails(employee.additional_details);
   }, [conversation.id]);
 
+  useEffect(() => {
+    // Deliberately keyed on `agentProfileLoaded` flipping true, not on
+    // `agentProfile` itself — the hook hands back a new object reference on
+    // every reload, including right after autonomy_level's immediate-apply
+    // update (see below), which would otherwise stomp an in-progress, unsaved
+    // personality/communication-style/expertise edit the instant autonomy
+    // level was changed via the (unrelated) select.
+    if (!agentProfileLoaded) return;
+    setPersonality(agentProfile.personality);
+    setCommunicationStyle(agentProfile.communicationStyle);
+    setExpertiseText(agentProfile.expertise.join(", "));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversation.id, agentProfileLoaded]);
+
   const managerName = resolveManagerName(employee.manager_employee_id, employeesById, userFullName);
   const identityBlock = buildIdentityBlock(
     name || conversation.name,
@@ -131,12 +165,17 @@ export function EmployeeSettingsPanel({
     .filter(Boolean)
     .join("\n\n");
   const responsibilityTexts = responsibilities.map((r) => r.text);
+  const expertiseList = expertiseText
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
   const fullPrompt = composeSystemPrompt(
     companyProfile,
     companySystemPrompt,
     identityBlock,
     { mission, preamble, additional_details: additionalDetails },
     responsibilityTexts,
+    { personality, communicationStyle, expertise: expertiseList, autonomyLevel: agentProfile.autonomyLevel },
   );
   const { tokens, exact } = useTokenCount(fullPrompt, employee.default_model);
 
@@ -146,7 +185,10 @@ export function EmployeeSettingsPanel({
     department !== employee.department ||
     mission !== employee.mission ||
     preamble !== employee.preamble ||
-    additionalDetails !== employee.additional_details;
+    additionalDetails !== employee.additional_details ||
+    personality !== agentProfile.personality ||
+    communicationStyle !== agentProfile.communicationStyle ||
+    expertiseList.join(",") !== agentProfile.expertise.join(",");
 
   const departmentNames = departments.map((d) => d.name);
   const departmentOptions = departmentNames.includes(employee.department)
@@ -188,6 +230,11 @@ export function EmployeeSettingsPanel({
     if (preamble !== employee.preamble) onUpdateField("preamble", preamble);
     if (additionalDetails !== employee.additional_details)
       onUpdateField("additional_details", additionalDetails);
+    if (personality !== agentProfile.personality) updateAgentProfileField("personality", personality);
+    if (communicationStyle !== agentProfile.communicationStyle)
+      updateAgentProfileField("communicationStyle", communicationStyle);
+    if (expertiseList.join(",") !== agentProfile.expertise.join(","))
+      updateAgentProfileField("expertise", expertiseList);
     setSavedFlash(true);
     setTimeout(() => setSavedFlash(false), 1500);
   };
@@ -472,6 +519,53 @@ export function EmployeeSettingsPanel({
               onChange={(e) => setAdditionalDetails(e.target.value)}
               placeholder="Anything else — decision rights, KPIs, escalation paths, handoffs, etc."
             />
+          </label>
+        </div>
+
+        <div className="settings-section">
+          <div className="settings-section-title">Personality &amp; autonomy</div>
+
+          <label className="settings-field">
+            <span className="settings-label">Personality</span>
+            <textarea
+              value={personality}
+              rows={3}
+              onChange={(e) => setPersonality(e.target.value)}
+              placeholder="How this employee comes across — e.g. blunt and dry, warm and encouraging, methodical"
+            />
+          </label>
+
+          <label className="settings-field">
+            <span className="settings-label">Communication style</span>
+            <input
+              value={communicationStyle}
+              onChange={(e) => setCommunicationStyle(e.target.value)}
+              placeholder="e.g. short messages, bullet points over prose, asks clarifying questions first"
+            />
+          </label>
+
+          <label className="settings-field">
+            <span className="settings-label">Areas of expertise</span>
+            <input
+              value={expertiseText}
+              onChange={(e) => setExpertiseText(e.target.value)}
+              placeholder="Comma-separated, e.g. fundraising, hiring, distributed systems"
+            />
+          </label>
+
+          <label className="settings-field">
+            <span className="settings-label">Autonomy level</span>
+            <select
+              value={agentProfile.autonomyLevel}
+              onChange={(e) => updateAgentProfileField("autonomyLevel", e.target.value as AutonomyLevel)}
+            >
+              {AUTONOMY_LEVELS.map((level) => (
+                <option key={level} value={level}>
+                  {AUTONOMY_LABELS[level]}
+                </option>
+              ))}
+            </select>
+            <span className="settings-hint">{AUTONOMY_HINTS[agentProfile.autonomyLevel]}</span>
           </label>
         </div>
 
