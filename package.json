@@ -10,7 +10,8 @@
     "tauri": "tauri",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "stage:node": "node scripts/fetch-node.mjs"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",
