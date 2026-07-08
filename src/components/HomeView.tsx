@@ -1,12 +1,16 @@
 import { BellSimple, BellSimpleSlash } from "@phosphor-icons/react";
 import { ActivityView } from "./ActivityView";
+import { ApprovalsPanel } from "./ApprovalsPanel";
+import { EmployeeInfo } from "./MessageList";
 
 interface Props {
   notificationsEnabled: boolean | null;
   onToggleNotifications: (enabled: boolean) => void;
+  companyId: string | null;
+  employeesById: Record<string, EmployeeInfo>;
 }
 
-export function HomeView({ notificationsEnabled, onToggleNotifications }: Props) {
+export function HomeView({ notificationsEnabled, onToggleNotifications, companyId, employeesById }: Props) {
   return (
     <div className="home-view">
       <div className="home-view-inner">
@@ -35,7 +39,8 @@ export function HomeView({ notificationsEnabled, onToggleNotifications }: Props)
           </button>
         </div>
 
-        <ActivityView />
+        <ApprovalsPanel companyId={companyId} employeesById={employeesById} />
+        <ActivityView companyId={companyId} />
       </div>
     </div>
   );

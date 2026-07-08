@@ -52,6 +52,10 @@ export default function App() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [hireOpen, setHireOpen] = useState(false);
   const [groupOpen, setGroupOpen] = useState(false);
+  // DMs created this session (via onboarding) that have no messages yet. Without this
+  // they'd be filtered out of the sidebar's DM list until first messaged, making a
+  // freshly-hired cohort look like it was never created.
+  const [freshDmIds, setFreshDmIds] = useState<Set<string>>(new Set());
 
   const { employee, updateField: updateEmployeeField, reload: reloadEmployee } = useEmployee(activeId || null);
   const { employees, reload: reloadEmployees } = useEmployees(companyId);
@@ -85,6 +89,7 @@ export default function App() {
   // stale conversation/employee from the previous company leaks into the pane.
   useEffect(() => {
     setActiveId("");
+    setFreshDmIds(new Set());
   }, [companyId]);
 
   const handleSwitchCompany = async (id: string) => {
@@ -148,10 +153,16 @@ export default function App() {
         {startupError && <div className="startup-error-banner">{startupError}</div>}
         <OnboardingWizard
           company={company}
-          onDone={async () => {
+          onDone={async (newDmConversationIds) => {
             await reloadCompany();
             await reloadConversations();
             await reloadEmployees();
+            // Keep the just-hired employees visible in the sidebar even though their
+            // DMs have no messages yet, and drop the user into the first one.
+            if (newDmConversationIds.length > 0) {
+              setFreshDmIds(new Set(newDmConversationIds));
+              setActiveId(newDmConversationIds[0]);
+            }
           }}
         />
       </div>
@@ -165,7 +176,9 @@ export default function App() {
     avatarByConversationId[e.conversation_id] = e.avatar;
   }
 
-  const visibleDms = dms.filter((c) => c.id === activeId || conversationsWithMessages.has(c.id));
+  const visibleDms = dms.filter(
+    (c) => c.id === activeId || conversationsWithMessages.has(c.id) || freshDmIds.has(c.id),
+  );
 
   const searchEntries = employees
     .map((emp) => {
@@ -233,6 +246,8 @@ export default function App() {
         <HomeView
           notificationsEnabled={notificationPrefLoaded ? notificationsEnabled : null}
           onToggleNotifications={setNotificationsEnabled}
+          companyId={companyId}
+          employeesById={employeesById}
         />
       )}
 

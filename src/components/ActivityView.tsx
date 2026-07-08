@@ -1,36 +1,63 @@
 import { useEffect } from "react";
-import type { Actor } from "@shared/protocol";
-import { onRuntimeEvent, startRuntimeBus } from "../lib/runtimeClient";
+import type { Actor, EventEnvelope } from "@shared/protocol";
+import { onRuntimeEvent, query, startRuntimeBus } from "../lib/runtimeClient";
 import { useActivityStore } from "../store/activityStore";
+import { useStaleGuard } from "../hooks/useStaleGuard";
 
 /**
- * Live audit / activity feed rendered from the runtime event stream. Fully
- * self-contained: it starts the runtime bus and subscribes on mount, so it
- * needs no wiring in App. This is the first end-to-end proof of the client↔
- * runtime path in the running UI (runtime → Rust → client → store → view).
+ * Audit / activity feed: real history from the durable events table
+ * (query:audit.list) seeded on mount/company-switch, then kept live via the
+ * runtime event stream. Company-scoped on both sides — the live subscription
+ * filters by companyId since the runtime bus broadcasts events for every
+ * company in the process, not just the active one.
  */
+// Mirrors sidecar/src/domains/audit/service.ts's AuditEventItem — no shared
+// workspace package between runtime and client (see CLAUDE.md), so this is a
+// deliberate, minimal duplication of the query:audit.list response shape.
+type AuditEventItem = Omit<EventEnvelope, "kind" | "companyId">;
+
 function actorLabel(actor: Actor): string {
   if (actor.kind === "user") return "You";
   if (actor.kind === "employee") return `Agent ${actor.employeeId.slice(0, 8)}`;
   return "System";
 }
 
-export function ActivityView() {
+interface Props {
+  companyId: string | null;
+}
+
+export function ActivityView({ companyId }: Props) {
   const events = useActivityStore((s) => s.events);
   const push = useActivityStore((s) => s.push);
+  const seedHistory = useActivityStore((s) => s.seedHistory);
   const clear = useActivityStore((s) => s.clear);
+  const { begin, isCurrent } = useStaleGuard();
+
+  useEffect(() => {
+    clear();
+    if (!companyId) return;
+    const token = begin();
+    query<AuditEventItem[]>("audit.list", { limit: 100 }, companyId).then((rows) => {
+      if (!isCurrent(token)) return;
+      const asEvents: EventEnvelope[] = rows.map((r) => ({ kind: "event", companyId, ...r }));
+      seedHistory(asEvents);
+    });
+  }, [companyId, clear, seedHistory, begin, isCurrent]);
 
   useEffect(() => {
     void startRuntimeBus();
-    const off = onRuntimeEvent((e) => push(e));
+    const off = onRuntimeEvent((e) => {
+      if (e.companyId !== companyId) return;
+      push(e);
+    });
     return off;
-  }, [push]);
+  }, [push, companyId]);
 
   return (
     <div className="activity-view">
       <div className="activity-header">
         <h2>Activity</h2>
-        <span className="activity-sub">Live event stream from the agent runtime</span>
+        <span className="activity-sub">Event history for this company, live-updating</span>
         {events.length > 0 && (
           <button className="settings-link-btn" onClick={clear}>
             Clear
