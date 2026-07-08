@@ -222,7 +222,10 @@ If `query()`'s generator completes without ever yielding a `type:"result"` messa
 
 Related, same file: **LOW — denied tool attempts leave no audit trace at all** (36-38, throws immediately with no event emitted — the most security-relevant case is the one that's invisible in the log).
 
-### 3.5 — `index.ts` (legacy CoS sidecar): malformed control block leaks raw JSON into the posted channel message — HIGH
+### 3.5 — `index.ts` (legacy CoS sidecar): malformed control block leaks raw JSON into the posted channel message — HIGH — ✅ DONE
+
+**Fix applied:** `text` is now computed once (stripping the matched fence region) before the try/catch, and reused in both the success and fallback branches — a parse failure no longer falls back to the raw untrimmed `fullText`. The relevance-check model id is now a named `RELEVANCE_CHECK_MODEL` constant instead of a buried string literal (not yet threaded through a shared cross-project registry with the frontend's `MODELS[]`, which would need its own plumbing — noted honestly rather than overclaimed). The exact-token-count fallback comment was also corrected to mention the primary local-subscription auth path, not just "other providers."
+
 **File:** `sidecar/src/index.ts`, `parseChannelControl`, 189-213
 
 When a `` ```control ``` `` fence is detected but its JSON fails to parse (e.g. model emits a trailing-comma or missing-comma typo), the catch branch returns the **entire raw response, fence markers and broken JSON included**, because the fallback's `respondsWithText` is `true`. This garbage gets posted verbatim as the employee's visible channel message.

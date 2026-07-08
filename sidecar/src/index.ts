@@ -58,6 +58,13 @@ interface SendChannelRequest {
 
 type IncomingRequest = SendRequest | CountTokensRequest | CheckRelevanceRequest | SendChannelRequest;
 
+// Relevance gatekeeping is always a cheap, internal Claude call regardless of which
+// provider the employee actually chats with (see handleCheckRelevance below). Named
+// so a future retirement of this snapshot is a one-line change instead of a buried
+// magic string (report §3.5) — not yet threaded through a cross-project model
+// registry shared with the frontend's `MODELS[]`, which would need its own plumbing.
+const RELEVANCE_CHECK_MODEL = "claude-haiku-4-5-20251001";
+
 function emit(payload: Record<string, unknown>): void {
   process.stdout.write(JSON.stringify(payload) + "\n");
 }
@@ -103,7 +110,9 @@ async function handleCountTokens(req: CountTokensRequest): Promise<void> {
     return;
   }
 
-  // Exact token counting is Anthropic-specific; other providers fall back to an
+  // Exact token counting is Anthropic-specific and requires ANTHROPIC_API_KEY; Codex
+  // users and Claude users authenticated only via Claude Code's local
+  // subscription/OAuth (the primary auth path, not an API key) fall back to an
   // approximation (this figure is only a system-prompt size indicator).
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (req.provider === "codex" || !apiKey) {
@@ -143,7 +152,7 @@ async function handleCheckRelevance(req: CheckRelevanceRequest): Promise<void> {
     let raw = "";
     await drainTurn(
       getProvider("claude").runTurn({
-        model: "claude-haiku-4-5-20251001",
+        model: RELEVANCE_CHECK_MODEL,
         effort: "low",
         systemPrompt,
         prompt: req.triggerMessage,
@@ -197,6 +206,12 @@ function parseChannelControl(fullText: string): { control: ChannelControl; text:
   const match = fullText.match(/```control\s*([\s\S]*?)\s*```/);
   if (!match) return { control: fallback, text: fullText.trim() };
 
+  // Strip the matched fence region regardless of whether the JSON inside it parses.
+  // Previously a parse failure (e.g. a missing comma from the model) fell back to the
+  // ENTIRE raw response — fence markers and broken JSON included — leaking the literal
+  // control block into the posted channel message (report §3.5).
+  const text = fullText.slice((match.index ?? 0) + match[0].length).trim();
+
   try {
     const parsed = JSON.parse(match[1]);
     const control: ChannelControl = {
@@ -205,10 +220,9 @@ function parseChannelControl(fullText: string): { control: ChannelControl; text:
       threadRootId: parsed.threadRootId ?? null,
       reactions: Array.isArray(parsed.reactions) ? parsed.reactions : [],
     };
-    const text = fullText.slice((match.index ?? 0) + match[0].length).trim();
     return { control, text };
   } catch {
-    return { control: fallback, text: fullText.trim() };
+    return { control: fallback, text };
   }
 }
 
