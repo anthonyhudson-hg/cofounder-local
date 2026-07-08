@@ -1,7 +1,7 @@
 import { mutate } from "../runtime/unitOfWork";
 import { requestApproval } from "../domains/approvals/service";
 import { evaluateCapability } from "./capability";
-import type { Tool, ToolContext } from "./types";
+import { effectRank, type Effect, type Tool, type ToolContext } from "./types";
 
 const registry = new Map<string, Tool>();
 
@@ -16,6 +16,33 @@ export function getTool(name: string): Tool | undefined {
 
 export function listTools(): Tool[] {
   return [...registry.values()];
+}
+
+export interface CapabilityScope {
+  scope: string;
+  /** Highest effect any registered tool in this scope needs — the ceiling that's actually meaningful to grant. */
+  maxEffect: Effect;
+  /** Names of the tools sharing this scope, for a UI hint (e.g. "memory.read, memory.write"). */
+  tools: string[];
+}
+
+/**
+ * Distinct grantable scopes across every registered tool, for a Permissions
+ * UI that shouldn't have to hardcode scope names — new tools/connectors
+ * automatically show up here the moment they're registered.
+ */
+export function listScopes(): CapabilityScope[] {
+  const byScope = new Map<string, CapabilityScope>();
+  for (const tool of registry.values()) {
+    const existing = byScope.get(tool.scope);
+    if (!existing) {
+      byScope.set(tool.scope, { scope: tool.scope, maxEffect: tool.effect, tools: [tool.name] });
+      continue;
+    }
+    existing.tools.push(tool.name);
+    if (effectRank(tool.effect) > effectRank(existing.maxEffect)) existing.maxEffect = tool.effect;
+  }
+  return [...byScope.values()].sort((a, b) => a.scope.localeCompare(b.scope));
 }
 
 export type InvokeResult =

@@ -130,6 +130,62 @@ test("capability gate: 'suggest' autonomy downgrades an otherwise-allowed write 
   await ctx.db.destroy();
 });
 
+test("capability grants: list/grant/revoke round-trip, cross-company leakage is rejected, revoke falls back to deny, and each mutation emits an event", async () => {
+  const { listGrants, revokeCapability } = await import("../tools/capability");
+  const ctx = freshCtx();
+  const { id: companyId, cosEmployeeId: emp } = await createCompany(ctx, { name: "A" }, { kind: "user" });
+  const { id: otherCompanyId } = await createCompany(ctx, { name: "B" }, { kind: "user" });
+
+  assert.deepEqual(await listGrants(ctx, companyId, emp), [], "no grants yet");
+
+  await grantCapability(ctx, companyId, emp, "tool:memory", "write-internal");
+  assert.deepEqual(await listGrants(ctx, companyId, emp), [{ scope: "tool:memory", maxEffect: "write-internal" }]);
+
+  // Re-granting the same scope updates in place, not a duplicate row.
+  await grantCapability(ctx, companyId, emp, "tool:memory", "read");
+  assert.deepEqual(await listGrants(ctx, companyId, emp), [{ scope: "tool:memory", maxEffect: "read" }]);
+
+  // A grant/revoke/list attempt against the WRONG company for this employee
+  // is rejected outright, not silently scoped/ignored (leakage-class check).
+  await assert.rejects(() => listGrants(ctx, otherCompanyId, emp), /not in company/);
+  await assert.rejects(() => grantCapability(ctx, otherCompanyId, emp, "tool:memory", "write-internal"), /not in company/);
+  await assert.rejects(() => revokeCapability(ctx, otherCompanyId, emp, "tool:memory"), /not in company/);
+  // Confirm the rejected cross-company grant attempt didn't actually write anything.
+  assert.deepEqual(await listGrants(ctx, companyId, emp), [{ scope: "tool:memory", maxEffect: "read" }]);
+
+  await revokeCapability(ctx, companyId, emp, "tool:memory");
+  assert.deepEqual(await listGrants(ctx, companyId, emp), [], "revoke hard-deletes the row");
+  // Post-revoke, invokeTool falls back to a real deny (no row), not approval,
+  // and never silently no-ops.
+  await assert.rejects(
+    () => invokeTool({ ctx, companyId, employeeId: emp }, "memory.write", { key: "k", value: "v" }),
+    /denied/,
+  );
+
+  const eventRows = await ctx.db
+    .selectFrom("events")
+    .where("company_id", "=", companyId)
+    .where("type", "in", ["capability.granted", "capability.revoked"])
+    .orderBy("seq")
+    .selectAll()
+    .execute();
+  assert.deepEqual(
+    eventRows.map((r) => r.type),
+    ["capability.granted", "capability.granted", "capability.revoked"],
+  );
+
+  await ctx.db.destroy();
+});
+
+test("listScopes: reflects exactly the tools registered today (tool:memory, connector:github)", async () => {
+  const { listScopes } = await import("../tools/registry");
+  const scopes = listScopes();
+  const byScope = Object.fromEntries(scopes.map((s) => [s.scope, s]));
+  assert.equal(byScope["tool:memory"].maxEffect, "write-internal", "memory.write outranks memory.read");
+  assert.deepEqual(new Set(byScope["tool:memory"].tools), new Set(["memory.write", "memory.read"]));
+  assert.equal(byScope["connector:github"].maxEffect, "external-write");
+});
+
 test("agent profile: defaults, update, JSON expertise round-trip, and field/value validation", async () => {
   const { getAgentProfile, updateAgentProfileField } = await import("../domains/employees/service");
   const ctx = freshCtx();

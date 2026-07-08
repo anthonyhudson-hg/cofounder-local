@@ -8,6 +8,9 @@ import {
   AUTONOMY_LABELS,
   AUTONOMY_LEVELS,
   AutonomyLevel,
+  CAPABILITY_EFFECTS,
+  CAPABILITY_EFFECT_LABELS,
+  CapabilityEffect,
   Conversation,
   EFFORTS,
   Effort,
@@ -16,8 +19,10 @@ import {
   PROVIDERS,
   PROVIDER_LABELS,
   Responsibility,
+  scopeLabel,
 } from "../types";
 import { useAgentProfile } from "../hooks/useAgentProfile";
+import { useCapabilities } from "../hooks/useCapabilities";
 import { useChannelMembership } from "../hooks/useChannelMembership";
 import { useDepartments } from "../hooks/useDepartments";
 import { useEscapeToClose } from "../hooks/useEscapeToClose";
@@ -126,6 +131,8 @@ export function EmployeeSettingsPanel({
 
   const { profile: agentProfile, loaded: agentProfileLoaded, updateField: updateAgentProfileField } =
     useAgentProfile(employee.id);
+  const { scopes: capabilityScopes, grants: capabilityGrants, setEffect: setCapabilityEffect } =
+    useCapabilities(companyId, employee.id);
   const [personality, setPersonality] = useState(agentProfile.personality);
   const [communicationStyle, setCommunicationStyle] = useState(agentProfile.communicationStyle);
   const [expertiseText, setExpertiseText] = useState(agentProfile.expertise.join(", "));
@@ -567,6 +574,38 @@ export function EmployeeSettingsPanel({
             </select>
             <span className="settings-hint">{AUTONOMY_HINTS[agentProfile.autonomyLevel]}</span>
           </label>
+        </div>
+
+        <div className="settings-section">
+          <div className="settings-section-title">Permissions</div>
+          {capabilityScopes.length === 0 ? (
+            <span className="settings-hint">No tools are registered yet.</span>
+          ) : (
+            capabilityScopes.map((s) => {
+              const current = capabilityGrants.find((g) => g.scope === s.scope)?.maxEffect ?? "none";
+              const maxIdx = CAPABILITY_EFFECTS.indexOf(s.maxEffect);
+              return (
+                <label className="settings-field" key={s.scope}>
+                  <span className="settings-label">{scopeLabel(s.scope)}</span>
+                  <select
+                    value={current}
+                    onChange={(e) => setCapabilityEffect(s.scope, e.target.value as CapabilityEffect)}
+                  >
+                    {CAPABILITY_EFFECTS.slice(0, maxIdx + 1).map((eff) => (
+                      <option key={eff} value={eff}>
+                        {CAPABILITY_EFFECT_LABELS[eff]}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="settings-hint">Used by: {s.tools.join(", ")}</span>
+                </label>
+              );
+            })
+          )}
+          <span className="settings-hint">
+            Without a grant, this employee can't use a tool at all — a chat request just gets a clean denial.
+            Requests beyond the grant here still ask for your approval before running.
+          </span>
         </div>
 
         <details className="settings-section settings-advanced">

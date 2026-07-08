@@ -236,3 +236,41 @@ export interface AgentProfile {
   expertise: string[];
   autonomyLevel: AutonomyLevel;
 }
+
+/** Mirrors sidecar/src/tools/types.ts's EFFECT_ORDER — least to most dangerous. */
+export const CAPABILITY_EFFECTS = ["none", "read", "write-internal", "external-read", "external-write"] as const;
+export type CapabilityEffect = (typeof CAPABILITY_EFFECTS)[number];
+
+export const CAPABILITY_EFFECT_LABELS: Record<CapabilityEffect, string> = {
+  none: "No access",
+  read: "Read-only",
+  "write-internal": "Read & write",
+  "external-read": "Read external services",
+  "external-write": "Read & write external services",
+};
+
+/** A grantable scope reflecting the tools currently registered server-side (tools/registry.ts's listScopes()). */
+export interface CapabilityScope {
+  scope: string;
+  maxEffect: CapabilityEffect;
+  tools: string[];
+}
+
+export interface CapabilityGrant {
+  scope: string;
+  maxEffect: CapabilityEffect;
+}
+
+const KNOWN_SCOPE_LABELS: Record<string, string> = {
+  "tool:memory": "Memory",
+  "connector:github": "GitHub connector",
+};
+
+/** Human-readable label for a scope string; unrecognized scopes (new tools/
+ *  connectors registered later) still get a reasonable fallback instead of
+ *  needing a frontend change every time one is added. */
+export function scopeLabel(scope: string): string {
+  if (KNOWN_SCOPE_LABELS[scope]) return KNOWN_SCOPE_LABELS[scope];
+  const name = scope.split(":")[1] ?? scope;
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}

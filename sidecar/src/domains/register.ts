@@ -11,7 +11,9 @@ import {
 } from "./companies/service";
 import { resolveApproval, listApprovals } from "./approvals/service";
 import { listEvents } from "./audit/service";
-import { invokeTool, runToolApproved } from "../tools/registry";
+import { invokeTool, runToolApproved, listScopes } from "../tools/registry";
+import { listGrants, grantCapability, revokeCapability } from "../tools/capability";
+import type { Effect } from "../tools/types";
 import { registerMemoryTools } from "../tools/builtin/memory";
 import { registerGithubConnector } from "../connectors/github";
 import {
@@ -108,6 +110,15 @@ function validateEffort(effort: string | undefined): Effort | undefined {
   return effort as Effort;
 }
 
+const VALID_EFFECTS: ReadonlySet<string> = new Set<Effect>(["none", "read", "write-internal", "external-read", "external-write"]);
+
+/** Same rationale as validateEffort — a garbage wire value would otherwise only
+ *  surface as a raw SQLite CHECK-constraint error deep inside grantCapability. */
+function validateEffect(effect: string): Effect {
+  if (!VALID_EFFECTS.has(effect)) throw new Error(`invalid capability effect: ${effect}`);
+  return effect as Effect;
+}
+
 register("query:companies.list", async (ctx) => listCompanies(ctx));
 
 register("query:company.active", async (ctx) => ({ activeCompanyId: await getActiveCompanyId(ctx) }));
@@ -199,6 +210,21 @@ register("query:agentProfile.get", async (ctx, inbound) =>
 register("command:agentProfile.update", async (ctx, inbound) => {
   const { employeeId, field, value } = p<{ employeeId: string; field: string; value: string }>(inbound);
   await updateAgentProfileField(ctx, employeeId, field, value);
+  return { ok: true };
+});
+register("query:capability.scopes", async () => listScopes());
+register("query:capability.list", async (ctx, inbound) => {
+  const { employeeId } = p<{ employeeId: string }>(inbound);
+  return listGrants(ctx, requireCompany(inbound), employeeId);
+});
+register("command:capability.grant", async (ctx, inbound) => {
+  const { employeeId, scope, maxEffect } = p<{ employeeId: string; scope: string; maxEffect: string }>(inbound);
+  await grantCapability(ctx, requireCompany(inbound), employeeId, scope, validateEffect(maxEffect));
+  return { ok: true };
+});
+register("command:capability.revoke", async (ctx, inbound) => {
+  const { employeeId, scope } = p<{ employeeId: string; scope: string }>(inbound);
+  await revokeCapability(ctx, requireCompany(inbound), employeeId, scope);
   return { ok: true };
 });
 register("command:employee.create", async (ctx, inbound) => {
