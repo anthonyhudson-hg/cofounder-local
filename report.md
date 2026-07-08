@@ -13,7 +13,7 @@ Severity key: **CRITICAL** (data loss / total feature death) · **HIGH** (real, 
 3. [x] **DONE** — **The GitHub tool lets an agent point `git add -A && git push` at any directory on disk and exfiltrate it with a stored PAT**, and the human approval prompt shows raw JSON, not a diff. (§2.2)
 4. [x] **DONE** — **CSP is fully disabled** (`"csp": null`) in an app that renders LLM-generated (and thus prompt-injectable) markdown. (§2.3)
 5. [x] **DONE** — **Manager-cycle validation is cosmetic.** The frontend blocks direct-report cycles only; the backend validates nothing. A 2+ hop cycle (A→C→B→A) is fully achievable and makes employees vanish from the org chart with no error. (§4.1)
-6. **The sidecar/runtime child processes have no crash detection, no restart, and can be orphaned on app exit.** One crash = silently dead AI chat for the rest of the session, surfaced only as a raw broken-pipe error. (§4.2)
+6. [x] **DONE** (partial — see §4.2) — **The sidecar/runtime child processes have no crash detection, no restart, and can be orphaned on app exit.** One crash = silently dead AI chat for the rest of the session, surfaced only as a raw broken-pipe error. (§4.2)
 7. [x] **DONE** — **Codex's "no tools" sandboxing claim is false**, and `CodexProvider.runTurn` unconditionally reports `success: true` even when nothing observably succeeded. (§2.5, §3.1 — corrected citation; originally mislabeled §4.3/§4.4 in this report, which are unrelated onboarding findings)
 8. [x] **DONE** — **`MessageList` re-renders every message row on every streamed token.** No memoization anywhere in the hot path. (§6.1)
 9. [x] **DONE** — **Six-plus UI actions (create/clone/delete company, create channel/group, hire, onboarding generate/finish) swallow errors silently** — `try { } finally { setBusy(false) }` with no `catch`, anywhere. (§1.2)
@@ -277,7 +277,12 @@ This only blocks an *immediate* cycle (excludes direct reports). It does not wal
 
 **Fix:** walk the full descendant subtree of the employee being edited (BFS/DFS over `manager_employee_id`) and exclude all of it — and enforce this in the sidecar too, since the frontend guard is the only thing standing between a user and permanently broken org data.
 
-### 4.2 — Sidecar/runtime process lifecycle: no crash recovery, possible orphans — HIGH
+### 4.2 — Sidecar/runtime process lifecycle: no crash recovery, possible orphans — HIGH — ⚠️ PARTIAL
+
+**Fix applied:** `lib.rs` now uses `Builder::build()` + `App::run(|app_handle, event| ...)` and calls a new `sidecar::kill_children()` on `RunEvent::Exit`, explicitly killing both child processes instead of relying solely on `kill_on_drop`. Both `SidecarState`/`RuntimeState` now also hold the `Child` handle (not just stdin); a new `watch_for_exit` polls the child every 300ms (releasing the lock between polls, which is what lets the exit-time kill actually acquire it) and clears both `stdin`/`child` to `None` once the process exits, so a `write_request`/`send_to_runtime` call after a crash now gets a clean "sidecar/runtime is not running" error instead of silently hitting a stale pipe and failing with a raw broken-pipe OS error. Spawn failures now also emit a `cos://startup-error`/`runtime://startup-error` Tauri event (previously only `eprintln!`'d to a console the packaged app's user will never see); `App.tsx` has a new `useStartupErrors` hook rendering a visible banner. The two spawn functions' near-duplicated boilerplate was consolidated into a shared `spawn_node_process` helper. `send_to_runtime` now rejects non-object payloads before forwarding to the privileged runtime process.
+
+**Not done:** auto-restart with backoff (a crash still requires a full app relaunch to recover, it just now fails cleanly instead of silently) and the graceful shutdown handshake (`{"type":"shutdown"}` + grace period before kill) — both left as follow-ups; noted here rather than silently omitted. WAL journal mode (already in use) provides crash-safety for SQLite in the meantime, which was the shutdown handshake's main justification.
+
 **File:** `src-tauri/src/sidecar.rs`
 
 - **No explicit exit hook** (lines 213-220, 258-268, 404-412, 448-451; missing at `lib.rs:27`): both child processes rely solely on `kill_on_drop(true)` firing when the `Child` (moved into a detached async task) drops. No `tauri::RunEvent::Exit`/`ExitRequested` handler explicitly kills them. On shutdown paths that terminate the host process without running every task's destructor, the `node` sidecar/runtime can survive the window closing — orphaned processes holding the SQLite file open.
@@ -288,8 +293,8 @@ This only blocks an *immediate* cycle (excludes direct reports). It does not wal
 **Fix:** register an explicit exit handler that kills both children; clear `stdin` to `None` on crash and consider bounded auto-restart with backoff; emit a `startup-error` event the UI can render; add a shutdown handshake before falling back to kill.
 
 Related, same file:
-- **MEDIUM — maintainability**: ~130 lines of duplicated spawn/wire-stdout/wait-task logic between the sidecar and runtime process management (179-271 vs. 356-454) — any fix to the above has to be applied twice.
-- **LOW — architecture**: `send_to_runtime` forwards unvalidated JSON straight to the privileged, DB-owning process (§1.4/§2.6) with zero shape/size check — pure pass-through, no defense-in-depth.
+- **MEDIUM — maintainability**: ~130 lines of duplicated spawn/wire-stdout/wait-task logic between the sidecar and runtime process management (179-271 vs. 356-454) — any fix to the above has to be applied twice. — ✅ DONE: extracted into a shared `spawn_node_process`/`watch_for_exit`.
+- **LOW — architecture**: `send_to_runtime` forwards unvalidated JSON straight to the privileged, DB-owning process (§1.4/§2.6) with zero shape/size check — pure pass-through, no defense-in-depth. — ✅ DONE (partial): now rejects non-object payloads; no size cap yet.
 
 ### 4.3 — Onboarding: new departments hardcode `position: 0` — MEDIUM
 **File:** `sidecar/src/domains/onboarding/service.ts:150`

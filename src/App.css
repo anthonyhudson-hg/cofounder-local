@@ -44,6 +44,15 @@ body {
   color: #888;
 }
 
+.startup-error-banner {
+  padding: 8px 16px;
+  background: #fdecea;
+  color: #7a1c1c;
+  font-size: 0.85rem;
+  border-bottom: 1px solid #f4c7c3;
+  flex-shrink: 0;
+}
+
 .app-shell {
   display: flex;
   flex: 1;

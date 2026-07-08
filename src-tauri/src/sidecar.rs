@@ -1,19 +1,43 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
+
+// How often the exit-watcher polls the child instead of blocking on `child.wait()` for
+// the process's whole lifetime — releasing the lock between polls is what lets
+// `kill_now()` (called from the app's Exit handler) actually acquire it (report §4.2).
+const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(300);
 
 pub struct SidecarState {
     stdin: Mutex<Option<ChildStdin>>,
+    child: Mutex<Option<Child>>,
 }
 
 impl SidecarState {
     pub fn new() -> Self {
         Self {
             stdin: Mutex::new(None),
+            child: Mutex::new(None),
+        }
+    }
+
+    /// Best-effort immediate kill, called from the app's `RunEvent::Exit` handler.
+    /// `kill_on_drop(true)` on the spawned `Command` is the primary safety net, but it
+    /// only fires if the `Child` value is actually dropped through normal Rust
+    /// unwinding — a shutdown path that bypasses that (e.g. the process being torn
+    /// down abruptly) could otherwise leave the sidecar/runtime orphaned, still
+    /// holding the SQLite file open (report §4.2). Uses `try_lock` (non-blocking,
+    /// safe to call from the synchronous event-loop callback) since this is a
+    /// best-effort backstop, not the only line of defense.
+    fn kill_now(&self) {
+        if let Ok(mut guard) = self.child.try_lock() {
+            if let Some(child) = guard.as_mut() {
+                let _ = child.start_kill();
+            }
         }
     }
 }
@@ -23,14 +47,31 @@ impl SidecarState {
 /// strangler transition.
 pub struct RuntimeState {
     stdin: Mutex<Option<ChildStdin>>,
+    child: Mutex<Option<Child>>,
 }
 
 impl RuntimeState {
     pub fn new() -> Self {
         Self {
             stdin: Mutex::new(None),
+            child: Mutex::new(None),
         }
     }
+
+    fn kill_now(&self) {
+        if let Ok(mut guard) = self.child.try_lock() {
+            if let Some(child) = guard.as_mut() {
+                let _ = child.start_kill();
+            }
+        }
+    }
+}
+
+/// Kills both managed child processes — called once from the app's `RunEvent::Exit`
+/// handler in `lib.rs` (report §4.2).
+pub fn kill_children(app: &AppHandle) {
+    app.state::<SidecarState>().kill_now();
+    app.state::<RuntimeState>().kill_now();
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -199,38 +240,95 @@ fn resolve_sidecar_script(app: &AppHandle) -> Result<PathBuf, String> {
     ))
 }
 
+/// Spawns `node <script>` with piped stdio and `kill_on_drop`. Shared by the sidecar
+/// and runtime process managers, which previously duplicated ~130 lines of near-
+/// identical spawn/pipe-wiring logic (report §4.2).
+struct SpawnedProcess {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: ChildStdout,
+    stderr: ChildStderr,
+}
+
+fn spawn_node_process(script: &PathBuf, extra_env: &[(&str, &std::ffi::OsStr)]) -> Result<SpawnedProcess, String> {
+    let mut cmd = Command::new("node");
+    cmd.arg(script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to spawn node process at {script:?}: {e}"))?;
+
+    let stdin = child.stdin.take().ok_or("process missing stdin")?;
+    let stdout = child.stdout.take().ok_or("process missing stdout")?;
+    let stderr = child.stderr.take().ok_or("process missing stderr")?;
+    Ok(SpawnedProcess { child, stdin, stdout, stderr })
+}
+
+/// Polls the child until it exits (rather than blocking on `child.wait()` for the
+/// process's whole lifetime), clearing `stdin`/`child` in `state` once it does so a
+/// later `write_request`/`send_to_runtime` call sees a clear "not running" error
+/// instead of silently hitting a stale pipe and failing with a raw broken-pipe OS
+/// error (report §4.2, item 2). Releasing the lock between polls is also what lets
+/// `kill_now()` acquire it.
+async fn watch_for_exit(
+    log_prefix: &'static str,
+    stdin_mutex: &Mutex<Option<ChildStdin>>,
+    child_mutex: &Mutex<Option<Child>>,
+) {
+    let status = loop {
+        let mut guard = child_mutex.lock().await;
+        let poll_result = match guard.as_mut() {
+            Some(child) => child.try_wait(),
+            None => return,
+        };
+        match poll_result {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                drop(guard);
+                tokio::time::sleep(EXIT_POLL_INTERVAL).await;
+            }
+            Err(e) => {
+                eprintln!("[{log_prefix}] error polling process status: {e}");
+                return;
+            }
+        }
+    };
+    eprintln!("[{log_prefix}] process exited: {status:?}");
+    *stdin_mutex.lock().await = None;
+    *child_mutex.lock().await = None;
+}
+
 pub fn spawn(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
-        if let Err(err) = spawn_inner(app).await {
+        if let Err(err) = spawn_inner(app.clone()).await {
             eprintln!("[sidecar] failed to start: {err}");
+            // Previously only printed to a console the packaged app's user will never
+            // see — the window would open looking fully functional, with every send
+            // then failing later with no indication of root cause (report §4.2).
+            let _ = app.emit("cos://startup-error", err);
         }
     });
 }
 
 async fn spawn_inner(app: AppHandle) -> Result<(), String> {
     let script = resolve_sidecar_script(&app)?;
-
-    let mut child: Child = Command::new("node")
-        .arg(&script)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| format!("failed to spawn node sidecar at {script:?}: {e}"))?;
-
-    let stdin = child.stdin.take().ok_or("sidecar missing stdin")?;
-    let stdout = child.stdout.take().ok_or("sidecar missing stdout")?;
-    let stderr = child.stderr.take().ok_or("sidecar missing stderr")?;
+    let proc = spawn_node_process(&script, &[])?;
 
     {
         let state = app.state::<SidecarState>();
-        *state.stdin.lock().await = Some(stdin);
+        *state.stdin.lock().await = Some(proc.stdin);
+        *state.child.lock().await = Some(proc.child);
     }
 
     let stdout_app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let mut lines = BufReader::new(stdout).lines();
+        let mut lines = BufReader::new(proc.stdout).lines();
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
@@ -256,15 +354,16 @@ async fn spawn_inner(app: AppHandle) -> Result<(), String> {
     });
 
     tauri::async_runtime::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
+        let mut lines = BufReader::new(proc.stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             eprintln!("[sidecar:stderr] {line}");
         }
     });
 
+    let wait_app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let status = child.wait().await;
-        eprintln!("[sidecar] process exited: {status:?}");
+        let state = wait_app.state::<SidecarState>();
+        watch_for_exit("sidecar", &state.stdin, &state.child).await;
     });
 
     Ok(())
@@ -391,8 +490,9 @@ fn resolve_db_path(app: &AppHandle) -> Result<PathBuf, String> {
 
 pub fn spawn_runtime(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
-        if let Err(err) = spawn_runtime_inner(app).await {
+        if let Err(err) = spawn_runtime_inner(app.clone()).await {
             eprintln!("[runtime] failed to start: {err}");
+            let _ = app.emit("runtime://startup-error", err);
         }
     });
 }
@@ -400,31 +500,21 @@ pub fn spawn_runtime(app: AppHandle) {
 async fn spawn_runtime_inner(app: AppHandle) -> Result<(), String> {
     let script = resolve_runtime_script(&app)?;
     let db_path = resolve_db_path(&app)?;
+    let db_path_os = db_path.as_os_str();
 
-    let mut child: Child = Command::new("node")
-        .arg(&script)
-        .env("COFOUNDER_DB_PATH", &db_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| format!("failed to spawn runtime at {script:?}: {e}"))?;
-
-    let stdin = child.stdin.take().ok_or("runtime missing stdin")?;
-    let stdout = child.stdout.take().ok_or("runtime missing stdout")?;
-    let stderr = child.stderr.take().ok_or("runtime missing stderr")?;
+    let proc = spawn_node_process(&script, &[("COFOUNDER_DB_PATH", db_path_os)])?;
 
     {
         let state = app.state::<RuntimeState>();
-        *state.stdin.lock().await = Some(stdin);
+        *state.stdin.lock().await = Some(proc.stdin);
+        *state.child.lock().await = Some(proc.child);
     }
 
     // Forward every runtime stdout line (event/result/ready) to the webview as
     // an opaque JSON value; the client's runtimeClient routes by kind + id.
     let stdout_app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let mut lines = BufReader::new(stdout).lines();
+        let mut lines = BufReader::new(proc.stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             if line.trim().is_empty() {
                 continue;
@@ -439,15 +529,16 @@ async fn spawn_runtime_inner(app: AppHandle) -> Result<(), String> {
     });
 
     tauri::async_runtime::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
+        let mut lines = BufReader::new(proc.stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             eprintln!("[runtime:stderr] {line}");
         }
     });
 
+    let wait_app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let status = child.wait().await;
-        eprintln!("[runtime] process exited: {status:?}");
+        let state = wait_app.state::<RuntimeState>();
+        watch_for_exit("runtime", &state.stdin, &state.child).await;
     });
 
     Ok(())
@@ -458,6 +549,13 @@ async fn spawn_runtime_inner(app: AppHandle) -> Result<(), String> {
 /// via the `runtime://event` stream, correlated by `id`.
 #[tauri::command]
 pub async fn send_to_runtime(app: AppHandle, message: serde_json::Value) -> Result<(), String> {
+    // A minimal shape check before this privileged, DB-owning process's stdin sees
+    // it — Rust was previously a pure pass-through with no validation at all
+    // (report §4.2).
+    if !message.is_object() {
+        return Err("send_to_runtime: message must be a JSON object".to_string());
+    }
+
     let mut line = serde_json::to_string(&message).map_err(|e| e.to_string())?;
     line.push('\n');
     let state = app.state::<RuntimeState>();

@@ -24,6 +24,7 @@ import { useDesktopNotifications } from "./hooks/useDesktopNotifications";
 import { useEmployee } from "./hooks/useEmployee";
 import { useEmployees } from "./hooks/useEmployees";
 import { useNotificationPreference } from "./hooks/useNotificationPreference";
+import { useStartupErrors } from "./hooks/useStartupErrors";
 import { useUserProfile } from "./hooks/useUserProfile";
 import { setActiveCompanyId } from "./lib/activeCompany";
 import { command } from "./lib/runtimeClient";
@@ -63,6 +64,7 @@ export default function App() {
     loaded: notificationPrefLoaded,
   } = useNotificationPreference();
   useDesktopNotifications(notificationsEnabled, activeId);
+  const startupError = useStartupErrors();
 
   useEffect(() => {
     startSidecarBus();
@@ -116,6 +118,7 @@ export default function App() {
     return (
       <div className="app-root">
         <TitleBar />
+        {startupError && <div className="startup-error-banner">{startupError}</div>}
         <div className="app-loading">Loading...</div>
       </div>
     );
@@ -125,6 +128,7 @@ export default function App() {
     return (
       <div className="app-root">
         <TitleBar />
+        {startupError && <div className="startup-error-banner">{startupError}</div>}
         <OnboardingModal onSubmit={setUserFullName} />
       </div>
     );
@@ -134,6 +138,7 @@ export default function App() {
     return (
       <div className="app-root">
         <TitleBar />
+        {startupError && <div className="startup-error-banner">{startupError}</div>}
         <div className="app-loading">No company set up yet.</div>
       </div>
     );
@@ -143,6 +148,7 @@ export default function App() {
     return (
       <div className="app-root">
         <TitleBar>{company.name}</TitleBar>
+        {startupError && <div className="startup-error-banner">{startupError}</div>}
         <OnboardingWizard
           company={company}
           onDone={async () => {
@@ -190,6 +196,7 @@ export default function App() {
   return (
     <div className="app-root">
       <TitleBar>{company.name}</TitleBar>
+      {startupError && <div className="startup-error-banner">{startupError}</div>}
       <div className="app-shell">
       <IconRail
         view={view}
