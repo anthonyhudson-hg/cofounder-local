@@ -28,7 +28,6 @@ import { useStartupErrors } from "./hooks/useStartupErrors";
 import { useUserProfile } from "./hooks/useUserProfile";
 import { setActiveCompanyId } from "./lib/activeCompany";
 import { command } from "./lib/runtimeClient";
-import { startSidecarBus } from "./lib/sidecarBus";
 import { applyTheme, themeForColor } from "./lib/themes";
 import { Employee } from "./types";
 
@@ -65,10 +64,6 @@ export default function App() {
   } = useNotificationPreference();
   useDesktopNotifications(notificationsEnabled, activeId);
   const startupError = useStartupErrors();
-
-  useEffect(() => {
-    startSidecarBus();
-  }, []);
 
   // Apply the active company's theme across the whole UI; re-applies on switch.
   useEffect(() => {
@@ -261,9 +256,7 @@ export default function App() {
               employee={employee}
               employees={employees}
               channels={channels}
-              companyProfile={company.profile}
-              companySystemPrompt={company.system_prompt}
-              userFullName={userFullName}
+              companyId={company.id}
               employeesById={employeesById}
               onNavigate={setActiveId}
               onOpenSidebar={() => setSidebarOpen(true)}

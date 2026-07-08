@@ -16,9 +16,7 @@ interface Props {
   employee: Employee | null;
   employees: Employee[];
   channels: Conversation[];
-  companyProfile: string;
-  companySystemPrompt: string;
-  userFullName: string;
+  companyId: string;
   employeesById: Record<string, EmployeeInfo>;
   onNavigate: (conversationId: string) => void;
   onOpenSidebar: () => void;
@@ -36,9 +34,7 @@ function ChannelChatPane({
   conversation,
   employees,
   channels,
-  companyProfile,
-  companySystemPrompt,
-  userFullName,
+  companyId,
   employeesById,
   onNavigate,
   onOpenSidebar,
@@ -47,11 +43,7 @@ function ChannelChatPane({
   const isGroup = !!conversation.is_group;
   const { messages, replyCounts, reactions, toggleReaction, members, send, sending } = useChannel(
     conversation.id,
-    conversation.name,
-    companyProfile,
-    companySystemPrompt,
-    userFullName,
-    employeesById,
+    companyId,
     onActivity,
   );
 
@@ -186,9 +178,7 @@ function DmChatPane({
   conversation,
   employee,
   channels,
-  companyProfile,
-  companySystemPrompt,
-  userFullName,
+  companyId,
   employeesById,
   onNavigate,
   onOpenSidebar,
@@ -196,12 +186,8 @@ function DmChatPane({
 }: Props) {
   const { messages, replyCounts, reactions, toggleReaction, send, sending } = useConversation(
     conversation.id,
+    companyId,
     employee,
-    conversation.name,
-    companyProfile,
-    companySystemPrompt,
-    userFullName,
-    employeesById,
     onActivity,
   );
   const { memberOf: employeeChannelIds } = useChannelMembership(employee?.id ?? "");
