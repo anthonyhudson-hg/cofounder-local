@@ -20,8 +20,12 @@ export function useTokenCount(text: string, model: string) {
         if (event.type === "token_count") {
           setTokens(event.tokens);
           setExact(event.exact);
-          unregisterRequestHandler(id);
+        } else if (event.type === "error") {
+          // Timed out or the sidecar rejected the request: don't leave the UI implying
+          // a stale count is current — mark it approximate instead (report §5.9).
+          setExact(false);
         }
+        unregisterRequestHandler(id);
       });
 
       invoke("cos_count_tokens", { id, provider: modelProvider(model), model, systemPrompt: text }).catch(() => {
@@ -29,7 +33,10 @@ export function useTokenCount(text: string, model: string) {
       });
     }, 500);
 
-    return () => clearTimeout(handle);
+    return () => {
+      clearTimeout(handle);
+      if (lastRequestId.current) unregisterRequestHandler(lastRequestId.current);
+    };
   }, [text, model]);
 
   return { tokens, exact };

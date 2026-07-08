@@ -18,12 +18,46 @@ import type {
  * Instead we retry the send until the runtime process's stdin is available.
  */
 
-type Pending = { resolve: (data: unknown) => void; reject: (err: Error) => void };
+type Pending = {
+  resolve: (data: unknown) => void;
+  reject: (err: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+  timeoutMs: number;
+};
 const pending = new Map<string, Pending>();
 type EventListener = (event: EventEnvelope) => void;
 const eventListeners = new Set<EventListener>();
 type DeltaListener = (channel: string, data: unknown) => void;
 const deltaListeners = new Map<string, DeltaListener>();
+
+// Plain commands/queries should fail fast; a streaming command (message.send) may
+// legitimately run for minutes but keeps producing deltas, so its idle timer resets
+// on every delta instead of using a single fixed deadline (report §1.1).
+const DEFAULT_TIMEOUT_MS = 30_000;
+const STREAM_IDLE_TIMEOUT_MS = 120_000;
+
+function timeoutError(id: string, timeoutMs: number): Error {
+  return new Error(
+    `No response from the runtime within ${Math.round(timeoutMs / 1000)}s (request ${id}). The sidecar/runtime process may be unresponsive.`,
+  );
+}
+
+function scheduleTimeout(id: string, timeoutMs: number): ReturnType<typeof setTimeout> {
+  return setTimeout(() => {
+    const p = pending.get(id);
+    if (!p) return;
+    pending.delete(id);
+    p.reject(timeoutError(id, timeoutMs));
+  }, timeoutMs);
+}
+
+/** Reset a pending request's inactivity timeout — called on each streamed delta. */
+function touchPending(id: string): void {
+  const p = pending.get(id);
+  if (!p) return;
+  clearTimeout(p.timer);
+  p.timer = scheduleTimeout(id, p.timeoutMs);
+}
 
 let started = false;
 let startPromise: Promise<void> | null = null;
@@ -40,15 +74,25 @@ export function startRuntimeBus(): Promise<void> {
       case "result": {
         const p = pending.get(msg.id);
         if (!p) return;
+        clearTimeout(p.timer);
         pending.delete(msg.id);
         if (msg.ok) p.resolve((msg as ResultEnvelope & { ok: true }).data);
         else p.reject(new Error((msg as ResultEnvelope & { ok: false }).error.message));
         break;
       }
       case "event":
-        for (const l of eventListeners) l(msg);
+        for (const l of eventListeners) {
+          try {
+            l(msg);
+          } catch (err) {
+            // Isolate listeners from each other — one throwing subscriber must not
+            // stop every other hook's event handler from running (report §3.8-adjacent).
+            console.error("onRuntimeEvent listener threw", err);
+          }
+        }
         break;
       case "delta": {
+        touchPending(msg.id);
         const dl = deltaListeners.get(msg.id);
         if (dl) dl(msg.channel, msg.data);
         break;
@@ -87,10 +131,13 @@ async function sendToRuntimeWithRetry(message: unknown): Promise<void> {
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
-function send(envelope: CommandEnvelope | QueryEnvelope): Promise<unknown> {
+function send(envelope: CommandEnvelope | QueryEnvelope, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    pending.set(envelope.id, { resolve, reject });
+    const timer = scheduleTimeout(envelope.id, timeoutMs);
+    pending.set(envelope.id, { resolve, reject, timer, timeoutMs });
     sendToRuntimeWithRetry(envelope).catch((err) => {
+      const p = pending.get(envelope.id);
+      if (p) clearTimeout(p.timer);
       pending.delete(envelope.id);
       reject(err instanceof Error ? err : new Error(String(err)));
     });
@@ -111,7 +158,9 @@ export async function query<T = unknown>(type: string, payload: unknown, company
 
 /**
  * A command that streams deltas (e.g. `message.send` yielding assistant text
- * chunks) before its final result. `onDelta(channel, data)` fires per chunk.
+ * chunks) before its final result. `onDelta(channel, data)` fires per chunk, and
+ * each delta resets the idle timeout so a long-but-actively-streaming turn survives
+ * while a genuinely stuck one still fails loudly instead of hanging forever.
  */
 export async function commandStreaming<T = unknown>(
   type: string,
@@ -124,7 +173,7 @@ export async function commandStreaming<T = unknown>(
   deltaListeners.set(id, onDelta);
   const env: CommandEnvelope = { kind: "command", id, type, companyId, payload };
   try {
-    return (await send(env)) as T;
+    return (await send(env, STREAM_IDLE_TIMEOUT_MS)) as T;
   } finally {
     deltaListeners.delete(id);
   }

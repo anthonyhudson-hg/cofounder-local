@@ -13,6 +13,11 @@ import { ReplyTarget } from "./useConversation";
 type RelevanceResultEvent = Extract<SidecarEvent, { type: "relevance_result" }>;
 type ChannelResultEvent = Extract<SidecarEvent, { type: "channel_result" }>;
 
+// Relevance checks are a quick classification call and should fail fast; a full
+// channel turn may include tool use and deserves more headroom before we give up.
+const RELEVANCE_TIMEOUT_MS = 30_000;
+const CHANNEL_SEND_TIMEOUT_MS = 120_000;
+
 export function useChannel(
   conversationId: string,
   conversationName: string,
@@ -61,34 +66,10 @@ export function useChannel(
     [reloadReactions],
   );
 
-  const send = useCallback(
-    async (text: string, replyTo?: ReplyTarget) => {
-      const trimmed = text.trim();
-      if (!trimmed) return;
-
-      const userMsgId = crypto.randomUUID();
-      const userThreadRootId = replyTo ? replyTo.threadRootId ?? replyTo.messageId : null;
-      const userMsg: Message = {
-        id: userMsgId, conversation_id: conversationId, role: "user", content: trimmed,
-        model: null, effort: null, input_tokens: null, output_tokens: null,
-        cache_creation_input_tokens: null, cache_read_input_tokens: null, total_cost_usd: null,
-        status: "complete", error_message: null, debug_payload: null,
-        thread_root_id: userThreadRootId, reply_to_message_id: replyTo?.messageId ?? null,
-        author_employee_id: null, created_at: new Date().toISOString(),
-      };
-      if (!userThreadRootId) {
-        messagesRef.current = [...messagesRef.current, userMsg];
-        setMessages(messagesRef.current);
-      }
-      await command("message.insertUser", {
-        id: userMsgId, conversationId, content: trimmed,
-        threadRootId: userThreadRootId, replyToMessageId: replyTo?.messageId ?? null,
-      }, null);
-      onActivity?.();
-
-      if (members.length === 0) return;
-      setSending(true);
-
+  // Split out so the outer `send` can guarantee `setSending(false)` via try/finally
+  // regardless of where in this body a throw happens (report §1.2).
+  const sendToMembers = useCallback(
+    async (trimmed: string, userMsgId: string) => {
       const openThreadRows = await query<{ id: string; content: string }[]>("messages.openThreads", { conversationId, limit: 10 }, null);
       const openThreads = openThreadRows.map((r) => ({ id: r.id, preview: r.content.slice(0, 60) }));
 
@@ -125,6 +106,7 @@ export function useChannel(
               "cos_check_relevance",
               { id, employeeContext, channelName: conversationName, triggerMessage: trimmed },
               id,
+              RELEVANCE_TIMEOUT_MS,
             );
             return { member, respond: event.respond, reason: event.reason };
           } catch (err) {
@@ -175,67 +157,104 @@ export function useChannel(
           const promptWithNotices = noticesBlock ? `${noticesBlock}\n\n${trimmed}` : trimmed;
 
           const id = crypto.randomUUID();
-          let result;
           useAgentActivity.getState().setActive(member.id, true);
           try {
-            result = await invokeAndWait<ChannelResultEvent>(
+            const result = await invokeAndWait<ChannelResultEvent>(
               "cos_send_channel",
               { id, provider, model: member.default_model, effort: member.default_effort, systemPrompt, prompt: promptWithNotices, resumeSessionId, openThreads, reactionTargets },
               id,
+              CHANNEL_SEND_TIMEOUT_MS,
             );
+
+            if (result.sessionId) {
+              await command("agentSession.upsert", { conversationId, employeeId: member.id, sessionId: result.sessionId, provider }, null);
+            }
+
+            for (const r of result.reactions) {
+              await command("reaction.add", { messageId: r.messageId, emoji: r.emoji, reactor: member.id }, null);
+            }
+
+            if (result.respondsWithText && result.text.trim()) {
+              const threadRootId =
+                result.threadRootId ??
+                (result.replyToMessageId
+                  ? openThreadRows.find((t) => t.id === result.replyToMessageId)?.id ?? result.replyToMessageId
+                  : null);
+
+              const channelMeta: ChannelDebugMeta = {
+                relevanceChecks: relevanceMeta,
+                replyToMessageId: result.replyToMessageId,
+                threadRootId,
+                reactionsApplied: result.reactions,
+              };
+              const debugPayload: DebugPayload = {
+                model: member.default_model, effort: member.default_effort,
+                companySystemPrompt, companyProfile, identityBlock,
+                mission: member.mission, preamble: member.preamble, responsibilities,
+                additionalDetails: member.additional_details, prompt: promptWithNotices,
+                reactionNotices, resumeSessionId, sentAt: new Date().toISOString(), channel: channelMeta,
+              };
+
+              await command("message.insertChannelAssistant", {
+                id: crypto.randomUUID(), conversationId, content: result.text.trim(),
+                model: member.default_model, effort: member.default_effort, debugPayload: JSON.stringify(debugPayload),
+                threadRootId, replyToMessageId: result.replyToMessageId, authorEmployeeId: member.id,
+                usage: result.usage, totalCostUsd: result.totalCostUsd,
+              }, null);
+            }
           } catch (err) {
+            // Covers both the send itself failing and any post-processing step above
+            // (session upsert, reactions, message insert) throwing — without this the
+            // whole Promise.all rejects and `sending` gets stuck true forever (report §1.2).
             await command("message.insertError", {
               id: crypto.randomUUID(), conversationId,
               errorMessage: err instanceof Error ? err.message : String(err), authorEmployeeId: member.id,
-            }, null);
-            return;
+            }, null).catch(() => {});
           } finally {
             useAgentActivity.getState().setActive(member.id, false);
-          }
-
-          if (result.sessionId) {
-            await command("agentSession.upsert", { conversationId, employeeId: member.id, sessionId: result.sessionId, provider }, null);
-          }
-
-          for (const r of result.reactions) {
-            await command("reaction.add", { messageId: r.messageId, emoji: r.emoji, reactor: member.id }, null);
-          }
-
-          if (result.respondsWithText && result.text.trim()) {
-            const threadRootId =
-              result.threadRootId ??
-              (result.replyToMessageId
-                ? openThreadRows.find((t) => t.id === result.replyToMessageId)?.id ?? result.replyToMessageId
-                : null);
-
-            const channelMeta: ChannelDebugMeta = {
-              relevanceChecks: relevanceMeta,
-              replyToMessageId: result.replyToMessageId,
-              threadRootId,
-              reactionsApplied: result.reactions,
-            };
-            const debugPayload: DebugPayload = {
-              model: member.default_model, effort: member.default_effort,
-              companySystemPrompt, companyProfile, identityBlock,
-              mission: member.mission, preamble: member.preamble, responsibilities,
-              additionalDetails: member.additional_details, prompt: promptWithNotices,
-              reactionNotices, resumeSessionId, sentAt: new Date().toISOString(), channel: channelMeta,
-            };
-
-            await command("message.insertChannelAssistant", {
-              id: crypto.randomUUID(), conversationId, content: result.text.trim(),
-              model: member.default_model, effort: member.default_effort, debugPayload: JSON.stringify(debugPayload),
-              threadRootId, replyToMessageId: result.replyToMessageId, authorEmployeeId: member.id,
-              usage: result.usage, totalCostUsd: result.totalCostUsd,
-            }, null);
           }
         }),
       );
 
       await reload();
-      setSending(false);
     },
-    [conversationId, conversationName, members, employeesById, companyProfile, companySystemPrompt, userFullName, onActivity, reload],
+    [conversationId, conversationName, members, employeesById, companyProfile, companySystemPrompt, userFullName, reload],
+  );
+
+  const send = useCallback(
+    async (text: string, replyTo?: ReplyTarget) => {
+      const trimmed = text.trim();
+      if (!trimmed) return;
+
+      const userMsgId = crypto.randomUUID();
+      const userThreadRootId = replyTo ? replyTo.threadRootId ?? replyTo.messageId : null;
+      const userMsg: Message = {
+        id: userMsgId, conversation_id: conversationId, role: "user", content: trimmed,
+        model: null, effort: null, input_tokens: null, output_tokens: null,
+        cache_creation_input_tokens: null, cache_read_input_tokens: null, total_cost_usd: null,
+        status: "complete", error_message: null, debug_payload: null,
+        thread_root_id: userThreadRootId, reply_to_message_id: replyTo?.messageId ?? null,
+        author_employee_id: null, created_at: new Date().toISOString(),
+      };
+      if (!userThreadRootId) {
+        messagesRef.current = [...messagesRef.current, userMsg];
+        setMessages(messagesRef.current);
+      }
+      await command("message.insertUser", {
+        id: userMsgId, conversationId, content: trimmed,
+        threadRootId: userThreadRootId, replyToMessageId: replyTo?.messageId ?? null,
+      }, null);
+      onActivity?.();
+
+      if (members.length === 0) return;
+      setSending(true);
+      try {
+        await sendToMembers(trimmed, userMsgId);
+      } finally {
+        setSending(false);
+      }
+    },
+    [conversationId, members, onActivity, sendToMembers],
   );
 
   return { messages, replyCounts, reactions, toggleReaction, members, send, sending, reload };
