@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useAsyncAction } from "../hooks/useAsyncAction";
 import { Company } from "../types";
 import { command } from "../lib/runtimeClient";
 
@@ -41,61 +42,58 @@ export function OnboardingWizard({ company, onDone }: Props) {
   const [priorities, setPriorities] = useState<string[]>([]);
   const [teamContext, setTeamContext] = useState("");
 
-  const [generating, setGenerating] = useState(false);
   const [suggestion, setSuggestion] = useState<Suggestion | null>(null);
   const [systemPrompt, setSystemPrompt] = useState("");
   const [selectedRoles, setSelectedRoles] = useState<Set<number>>(new Set());
   const [selectedChannels, setSelectedChannels] = useState<Set<number>>(new Set());
-  const [applying, setApplying] = useState(false);
 
   const togglePriority = (p: string) =>
     setPriorities((prev) => (prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]));
 
-  const generate = async () => {
-    setGenerating(true);
+  const [runGenerate, { busy: generating, error: generateError }] = useAsyncAction(async () => {
+    const s = await command<Suggestion>(
+      "onboarding.generate",
+      { companyName: name, description, stage, industry, customer, priorities, teamContext },
+      company.id,
+    );
+    setSuggestion(s);
+    setSystemPrompt(s.systemPrompt);
+    setSelectedRoles(new Set(s.roles.map((_, i) => i)));
+    setSelectedChannels(new Set(s.channels.map((_, i) => i)));
+  });
+
+  const generate = () => {
     setStep("review");
-    try {
-      const s = await command<Suggestion>(
-        "onboarding.generate",
-        { companyName: name, description, stage, industry, customer, priorities, teamContext },
-        company.id,
-      );
-      setSuggestion(s);
-      setSystemPrompt(s.systemPrompt);
-      setSelectedRoles(new Set(s.roles.map((_, i) => i)));
-      setSelectedChannels(new Set(s.channels.map((_, i) => i)));
-    } finally {
-      setGenerating(false);
-    }
+    runGenerate();
   };
 
-  const finish = async () => {
+  const [runFinish, { busy: applying, error: finishError }] = useAsyncAction(async () => {
     if (!suggestion) return;
-    setApplying(true);
-    try {
-      await command(
-        "onboarding.apply",
-        {
-          companyName: name || "My Company",
-          profile: suggestion.profile,
-          systemPrompt,
-          roles: suggestion.roles.filter((_, i) => selectedRoles.has(i)),
-          channels: suggestion.channels.filter((_, i) => selectedChannels.has(i)),
-        },
-        company.id,
-      );
-      onDone();
-    } finally {
-      setApplying(false);
-    }
-  };
-
-  const skip = async () => {
-    await command("company.update", { companyId: company.id, field: "name", value: name || company.name }, null);
-    // mark onboarded without hires
-    await command("onboarding.apply", { companyName: name || company.name, profile: company.profile, systemPrompt: company.system_prompt, roles: [], channels: [] }, company.id);
+    await command(
+      "onboarding.apply",
+      {
+        companyName: name.trim() || "My Company",
+        profile: suggestion.profile,
+        systemPrompt,
+        roles: suggestion.roles.filter((_, i) => selectedRoles.has(i)),
+        channels: suggestion.channels.filter((_, i) => selectedChannels.has(i)),
+      },
+      company.id,
+    );
     onDone();
-  };
+  });
+
+  const [runSkip, { busy: skipping, error: skipError }] = useAsyncAction(async () => {
+    const trimmedName = name.trim() || company.name;
+    await command("company.update", { companyId: company.id, field: "name", value: trimmedName }, null);
+    // mark onboarded without hires
+    await command(
+      "onboarding.apply",
+      { companyName: trimmedName, profile: company.profile, systemPrompt: company.system_prompt, roles: [], channels: [] },
+      company.id,
+    );
+    onDone();
+  });
 
   return (
     <div className="modal-scrim">
@@ -136,9 +134,12 @@ export function OnboardingWizard({ company, onDone }: Props) {
               <input value={customer} onChange={(e) => setCustomer(e.target.value)} placeholder="Seed-stage B2B sales teams" />
             </label>
             <div className="onboarding-actions">
-              <button className="settings-link-btn" onClick={skip}>Skip for now</button>
+              <button className="settings-link-btn" disabled={skipping} onClick={runSkip}>
+                {skipping ? "Skipping…" : "Skip for now"}
+              </button>
               <button className="settings-save-btn" disabled={!description.trim()} onClick={() => setStep("focus")}>Next</button>
             </div>
+            {skipError && <p className="form-error">{skipError}</p>}
           </div>
         )}
 
@@ -169,6 +170,16 @@ export function OnboardingWizard({ company, onDone }: Props) {
           <div className="onboarding-body">
             {generating ? (
               <div className="onboarding-generating">Designing your company & team…</div>
+            ) : generateError ? (
+              // Previously this branch rendered nothing at all — a dead-end blank screen
+              // with no error and no way back or to retry (report §5.1).
+              <div className="onboarding-generating">
+                <p className="form-error">Couldn't generate your company: {generateError}</p>
+                <div className="onboarding-actions">
+                  <button className="settings-link-btn" onClick={() => setStep("focus")}>Back</button>
+                  <button className="settings-save-btn" onClick={runGenerate}>Retry</button>
+                </div>
+              </div>
             ) : suggestion ? (
               <>
                 <div className="settings-field">
@@ -182,7 +193,18 @@ export function OnboardingWizard({ company, onDone }: Props) {
                   {suggestion.roles.length === 0 && <div className="onboarding-empty">No extra hires suggested yet — your Chief of Staff can cover a lot at this stage.</div>}
                   {suggestion.roles.map((r, i) => (
                     <label key={i} className="onboarding-role">
-                      <input type="checkbox" checked={selectedRoles.has(i)} onChange={() => setSelectedRoles((prev) => { const n = new Set(prev); n.has(i) ? n.delete(i) : n.add(i); return n; })} />
+                      <input
+                        type="checkbox"
+                        checked={selectedRoles.has(i)}
+                        onChange={() =>
+                          setSelectedRoles((prev) => {
+                            const n = new Set(prev);
+                            if (n.has(i)) n.delete(i);
+                            else n.add(i);
+                            return n;
+                          })
+                        }
+                      />
                       <span className="onboarding-role-main">
                         <strong>{r.jobTitle}</strong> <span className="onboarding-role-dept">{r.department}</span>
                         <span className="onboarding-role-why">{r.why}</span>
@@ -196,7 +218,18 @@ export function OnboardingWizard({ company, onDone }: Props) {
                     <span className="settings-label">Suggested channels</span>
                     <div className="onboarding-chips">
                       {suggestion.channels.map((c, i) => (
-                        <button key={c} className={`onboarding-chip ${selectedChannels.has(i) ? "on" : ""}`} onClick={() => setSelectedChannels((prev) => { const n = new Set(prev); n.has(i) ? n.delete(i) : n.add(i); return n; })}>
+                        <button
+                          key={c}
+                          className={`onboarding-chip ${selectedChannels.has(i) ? "on" : ""}`}
+                          onClick={() =>
+                            setSelectedChannels((prev) => {
+                              const n = new Set(prev);
+                              if (n.has(i)) n.delete(i);
+                              else n.add(i);
+                              return n;
+                            })
+                          }
+                        >
                           #{c}
                         </button>
                       ))}
@@ -206,8 +239,9 @@ export function OnboardingWizard({ company, onDone }: Props) {
 
                 <div className="onboarding-actions">
                   <button className="settings-link-btn" onClick={() => setStep("focus")}>Back</button>
-                  <button className="settings-save-btn" disabled={applying} onClick={finish}>{applying ? "Setting up…" : "Finish setup"}</button>
+                  <button className="settings-save-btn" disabled={applying} onClick={runFinish}>{applying ? "Setting up…" : "Finish setup"}</button>
                 </div>
+                {finishError && <p className="form-error">{finishError}</p>}
               </>
             ) : null}
           </div>

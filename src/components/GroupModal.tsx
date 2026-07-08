@@ -1,5 +1,7 @@
 import { X } from "@phosphor-icons/react";
 import { useMemo, useState } from "react";
+import { useAsyncAction } from "../hooks/useAsyncAction";
+import { useEscapeToClose } from "../hooks/useEscapeToClose";
 import { Employee } from "../types";
 import { Avatar } from "./Avatar";
 import { EmployeeInfo } from "./MessageList";
@@ -15,7 +17,6 @@ export function GroupModal({ employees, employeesById, onCreate, onClose }: Prop
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [name, setName] = useState("");
-  const [creating, setCreating] = useState(false);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -32,27 +33,23 @@ export function GroupModal({ employees, employeesById, onCreate, onClose }: Prop
     });
   };
 
+  const [runCreate, { busy: creating, error: createError }] = useAsyncAction(async () => {
+    const ids = Array.from(selected);
+    const defaultName = ids.map((id) => employeesById[id]?.name).filter(Boolean).join(", ");
+    await onCreate(name.trim() || defaultName, ids);
+    onClose();
+  });
+
   const canCreate = selected.size >= 2 && !creating;
 
-  const handleCreate = async () => {
-    if (!canCreate) return;
-    setCreating(true);
-    try {
-      const ids = Array.from(selected);
-      const defaultName = ids.map((id) => employeesById[id]?.name).filter(Boolean).join(", ");
-      await onCreate(name.trim() || defaultName, ids);
-      onClose();
-    } finally {
-      setCreating(false);
-    }
-  };
+  useEscapeToClose(true, onClose);
 
   return (
     <div className="modal-scrim" onClick={onClose}>
       <div className="modal group-modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h3>New group</h3>
-          <button className="modal-close" onClick={onClose}>
+          <button className="modal-close" aria-label="Close" onClick={onClose}>
             <X />
           </button>
         </div>
@@ -91,11 +88,15 @@ export function GroupModal({ employees, employeesById, onCreate, onClose }: Prop
               </label>
             ))}
           </div>
+          {selected.size < 2 && (
+            <p className="settings-hint">Select at least 2 people to create a group.</p>
+          )}
           <div className="settings-save-row">
-            <button className="settings-save-btn" disabled={!canCreate} onClick={handleCreate}>
+            <button className="settings-save-btn" disabled={!canCreate} onClick={runCreate}>
               {creating ? "Creating…" : `Create group${selected.size ? ` (${selected.size})` : ""}`}
             </button>
           </div>
+          {createError && <p className="form-error">{createError}</p>}
         </div>
       </div>
     </div>

@@ -1,7 +1,9 @@
-import { X } from "@phosphor-icons/react";
-import { useEffect, useState } from "react";
+import { Check, X } from "@phosphor-icons/react";
+import { useCallback, useEffect, useState } from "react";
+import { useAsyncAction } from "../hooks/useAsyncAction";
 import { useCreateEmployee } from "../hooks/useCreateEmployee";
 import { useDepartments } from "../hooks/useDepartments";
+import { useEscapeToClose } from "../hooks/useEscapeToClose";
 import { Candidate, fetchCandidates } from "../lib/randomUser";
 import { DEFAULT_DEPARTMENT_SUGGESTIONS, Employee } from "../types";
 
@@ -22,7 +24,7 @@ export function HireModal({ companyId, employees, onCreated, onClose }: Props) {
 
   const [candidates, setCandidates] = useState<Candidate[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [creatingName, setCreatingName] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [addingDepartment, setAddingDepartment] = useState(false);
   const [newDepartmentName, setNewDepartmentName] = useState("");
 
@@ -47,11 +49,16 @@ export function HireModal({ companyId, employees, onCreated, onClose }: Props) {
     setDepartment(trimmed);
   };
 
-  const canProceed = mode === "search" ? searchText.trim().length > 0 : !!department;
+  // While a new department is being typed, Next stays disabled instead of racing the
+  // blur-triggered create against a direct click on Next (report §5.9) — the user must
+  // explicitly commit the new department (Enter / confirm button / blur) first, which
+  // flips `addingDepartment` false and unlocks Next with `department` already set.
+  const canProceed = mode === "search" ? searchText.trim().length > 0 : !addingDepartment && !!department;
 
   useEffect(() => {
     if (step !== "candidates" || candidates) return;
     let cancelled = false;
+    setLoadError(null);
     fetchCandidates(54)
       .then((results) => {
         if (!cancelled) setCandidates(results);
@@ -62,12 +69,15 @@ export function HireModal({ companyId, employees, onCreated, onClose }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [step, candidates]);
+  }, [step, candidates, loadAttempt]);
 
-  const handlePick = async (candidate: Candidate) => {
-    if (creatingName) return;
-    setCreatingName(candidate.name);
-    try {
+  const retryLoadCandidates = useCallback(() => {
+    setLoadError(null);
+    setLoadAttempt((n) => n + 1);
+  }, []);
+
+  const [runPick, { busy: picking, error: pickError }, clearPickError] = useAsyncAction(
+    async (candidate: Candidate) => {
       const { conversationId } = await create({
         name: candidate.name,
         photoUrl: candidate.photoUrl,
@@ -75,17 +85,26 @@ export function HireModal({ companyId, employees, onCreated, onClose }: Props) {
         department: mode === "browse" ? department ?? "" : "",
       });
       onCreated(conversationId);
-    } finally {
-      setCreatingName(null);
-    }
+    },
+  );
+  const [pickingName, setPickingName] = useState<string | null>(null);
+
+  const handlePick = async (candidate: Candidate) => {
+    if (pickingName) return;
+    setPickingName(candidate.name);
+    clearPickError();
+    await runPick(candidate);
+    setPickingName(null);
   };
+
+  useEscapeToClose(true, onClose);
 
   return (
     <div className="modal-scrim" onClick={onClose}>
       <div className="modal hire-modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h3>Hire a new employee</h3>
-          <button className="modal-close" onClick={onClose}>
+          <button className="modal-close" aria-label="Close" onClick={onClose}>
             <X />
           </button>
         </div>
@@ -150,6 +169,16 @@ export function HireModal({ companyId, employees, onCreated, onClose }: Props) {
                       }}
                       onBlur={handleConfirmNewDepartment}
                     />
+                    <button
+                      type="button"
+                      className="settings-icon-btn"
+                      title="Confirm department"
+                      aria-label="Confirm department"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={handleConfirmNewDepartment}
+                    >
+                      <Check />
+                    </button>
                   </div>
                 ) : (
                   <button
@@ -177,7 +206,14 @@ export function HireModal({ companyId, employees, onCreated, onClose }: Props) {
         {step === "candidates" && (
           <div className="hire-step">
             <p className="hire-step-prompt">Pick a candidate</p>
-            {loadError && <div className="hire-error">Couldn't load candidates: {loadError}</div>}
+            {loadError && (
+              <div className="hire-error">
+                Couldn't load candidates: {loadError}{" "}
+                <button className="settings-link-btn" onClick={retryLoadCandidates}>
+                  Retry
+                </button>
+              </div>
+            )}
             {!candidates && !loadError && <div className="hire-loading">Finding candidates…</div>}
             {candidates && (
               <div className="hire-candidate-grid">
@@ -185,16 +221,17 @@ export function HireModal({ companyId, employees, onCreated, onClose }: Props) {
                   <button
                     key={c.name}
                     className="hire-candidate-card"
-                    disabled={!!creatingName}
+                    disabled={!!pickingName || picking}
                     onClick={() => handlePick(c)}
                   >
                     <img className="hire-candidate-photo" src={c.photoUrl} alt={c.name} />
                     <span className="hire-candidate-name">{c.name}</span>
-                    {creatingName === c.name && <span className="hire-candidate-hiring">Hiring…</span>}
+                    {pickingName === c.name && <span className="hire-candidate-hiring">Hiring…</span>}
                   </button>
                 ))}
               </div>
             )}
+            {pickError && <p className="form-error">Couldn't hire: {pickError}</p>}
           </div>
         )}
       </div>

@@ -12,11 +12,11 @@ Severity key: **CRITICAL** (data loss / total feature death) · **HIGH** (real, 
 2. **The vault's fallback master key gets written to the OS temp directory.** Wipe temp, lose every secret permanently. (§2.1)
 3. **The GitHub tool lets an agent point `git add -A && git push` at any directory on disk and exfiltrate it with a stored PAT**, and the human approval prompt shows raw JSON, not a diff. (§2.2)
 4. **CSP is fully disabled** (`"csp": null`) in an app that renders LLM-generated (and thus prompt-injectable) markdown. (§2.3)
-5. **Manager-cycle validation is cosmetic.** The frontend blocks direct-report cycles only; the backend validates nothing. A 2+ hop cycle (A→C→B→A) is fully achievable and makes employees vanish from the org chart with no error. (§4.1)
+5. [x] **DONE** — **Manager-cycle validation is cosmetic.** The frontend blocks direct-report cycles only; the backend validates nothing. A 2+ hop cycle (A→C→B→A) is fully achievable and makes employees vanish from the org chart with no error. (§4.1)
 6. **The sidecar/runtime child processes have no crash detection, no restart, and can be orphaned on app exit.** One crash = silently dead AI chat for the rest of the session, surfaced only as a raw broken-pipe error. (§4.2)
 7. **Codex's "no tools" sandboxing claim is false**, and `CodexProvider.runTurn` unconditionally reports `success: true` even when nothing observably succeeded. (§4.3, §4.4)
 8. **`MessageList` re-renders every message row on every streamed token.** No memoization anywhere in the hot path. (§6.1)
-9. **Six-plus UI actions (create/clone/delete company, create channel/group, hire, onboarding generate/finish) swallow errors silently** — `try { } finally { setBusy(false) }` with no `catch`, anywhere. (§1.2)
+9. [x] **DONE** — **Six-plus UI actions (create/clone/delete company, create channel/group, hire, onboarding generate/finish) swallow errors silently** — `try { } finally { setBusy(false) }` with no `catch`, anywhere. (§1.2)
 
 ---
 
@@ -34,7 +34,10 @@ These patterns repeat across many files. Fix the pattern once instead of patchin
 
 **Fix:** add a per-request timeout (30-60s) at the lowest common layer — `runtimeClient.ts`'s `send()` and `sidecarRequest.ts`'s `invokeAndWait()` — that rejects with a clear "no response from sidecar" error. Every caller already either has or should have a `catch` (see §1.2) to turn that into a visible error state instead of an infinite spinner.
 
-### 1.2 — Systemic missing error handling on fire-and-forget async UI actions — HIGH
+### 1.2 — Systemic missing error handling on fire-and-forget async UI actions — HIGH — ✅ DONE
+
+**Fix applied:** added a shared `useAsyncAction` hook (`src/hooks/useAsyncAction.ts`) that captures a thrown/rejected error into state instead of a bare `try/finally`, plus a `.form-error` CSS class to render it. Applied to every call site listed: `Sidebar.tsx` (create channel), `CompanySwitcher.tsx` (create/clone), `AppSettingsModal.tsx` (photo upload, delete), `EmployeeSettingsPanel.tsx` (photo upload, via the new shared `usePhotoUpload` hook), `GroupModal.tsx` (create), `HireModal.tsx` (fetch candidates — now with a Retry button — and hire), `OnboardingWizard.tsx` (generate/finish/skip). `useChannel.ts`/`useConversation.ts` got the equivalent treatment as part of §1.1 since their failure modes were the same root cause. `App.tsx`'s own handlers (`handleSwitchCompany` etc.) were left to propagate — that's correct, since the catch now lives at each actual call site closest to the UI feedback surface.
+
 **Where (non-exhaustive, same bug repeated ~10+ times):**
 - `src/App.tsx`: `handleSwitchCompany`, `handleCloneCompany`, `handleDeleteCompany`, `handleCreateChannel`, and inline `onCreated`/`onCreate`/`onRename` modal callbacks (lines 85-107, 267-314)
 - `AppSettingsModal.tsx`: photo upload (47-58), delete company (162-163)
@@ -226,7 +229,10 @@ Neither `ClaudeProvider` nor `CodexProvider` is exercised anywhere — the one c
 
 ## Part 4 — Sidecar Domains & Database
 
-### 4.1 — Manager-cycle validation is cosmetic — HIGH
+### 4.1 — Manager-cycle validation is cosmetic — HIGH — ✅ DONE
+
+**Fix applied:** `EmployeeSettingsPanel.tsx` now computes the full descendant subtree of the employee being edited via BFS (`descendantIds`) and excludes all of it from the manager picker, not just direct reports. `sidecar/src/domains/employees/service.ts`'s `updateEmployeeField` enforces the same invariant server-side (walks the reporting subtree and throws before persisting a cycle-forming `manager_employee_id`), so the guard can no longer be bypassed by any other write path.
+
 **Files:** `src/components/EmployeeSettingsPanel.tsx:141-145` (frontend filter, only real guard in the system), `sidecar/src/domains/employees/service.ts:27-44` (`updateEmployeeField`, zero validation), symptom visible in `src/components/OrgChartView.tsx:29-34`
 
 ```js
@@ -322,7 +328,10 @@ When `result.success` is `false` (rate limit, max-turns, refusal from the SDK), 
 
 ## Part 5 — Frontend: Correctness, UX, Accessibility
 
-### 5.1 — Onboarding wizard: failed generation renders a completely blank, dead-end screen — HIGH
+### 5.1 — Onboarding wizard: failed generation renders a completely blank, dead-end screen — HIGH — ✅ DONE
+
+**Fix applied:** `generate`/`finish`/`skip` now run through `useAsyncAction`; the review step has an explicit `generateError` branch with a message + Back/Retry buttons instead of rendering `null`. `skip` is now busy-guarded (button shows "Skipping…" and disables) and trims the company name before persisting.
+
 **File:** `src/components/OnboardingWizard.tsx:168-214, 54-70`
 
 `generate()` has no try/catch at all (54-70) — failures are unhandled promise rejections. On failure, `suggestion` stays `null` and `generating` becomes `false`. The review step's render logic is `generating ? <spinner> : suggestion ? (<>...Back/Finish...</>) : null` — the `null` branch renders **nothing**, including no Back button (Back only exists inside the `suggestion &&` branch). The user lands on a completely blank screen with no error, no retry, and no way to navigate back — the only escape is restarting the app, during first-run onboarding.
