@@ -11,7 +11,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint .",
-    "stage:node": "node scripts/fetch-node.mjs"
+    "stage:node": "node scripts/fetch-node.mjs",
+    "build:sidecar": "npm --prefix sidecar ci && npm --prefix sidecar run build && npm --prefix sidecar prune --omit=dev",
+    "build:release": "npm run stage:node && npm run build:sidecar && npm run build"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",
