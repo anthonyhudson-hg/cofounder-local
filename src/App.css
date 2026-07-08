@@ -2825,6 +2825,15 @@ body {
   color: #d1242f;
 }
 
+/* Shared inline error text for modal/panel async actions (report §1.2) */
+.form-error {
+  margin: 4px 0 0;
+  padding: 0;
+  color: #d1242f;
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
 .hire-candidate-grid {
   display: grid;
   grid-template-columns: repeat(6, 1fr);

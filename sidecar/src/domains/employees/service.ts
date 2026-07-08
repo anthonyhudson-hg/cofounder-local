@@ -38,6 +38,36 @@ export async function updateEmployeeField(
       .select(["id", "company_id"])
       .executeTakeFirst();
     if (!emp) throw new Error("employee not found");
+
+    if (field === "manager_employee_id" && value) {
+      if (value === emp.id) throw new Error("an employee cannot manage themselves");
+      // Walk the full reporting subtree of `emp.id`. The frontend's own picker already
+      // excludes it, but that guard only blocks a 1-hop cycle and nothing else in the
+      // system enforces this — this is the only real backstop against a corrupted org
+      // chart via any other write path (report §4.1).
+      const rows = await trx
+        .selectFrom("employees")
+        .where("company_id", "=", emp.company_id)
+        .select(["id", "manager_employee_id"])
+        .execute();
+      const byManager = new Map<string, string[]>();
+      for (const r of rows) {
+        if (!r.manager_employee_id) continue;
+        const list = byManager.get(r.manager_employee_id);
+        if (list) list.push(r.id);
+        else byManager.set(r.manager_employee_id, [r.id]);
+      }
+      const queue = [...(byManager.get(emp.id) ?? [])];
+      const seen = new Set<string>();
+      while (queue.length > 0) {
+        const id = queue.shift()!;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        if (id === value) throw new Error("cannot set manager: would create a reporting cycle");
+        queue.push(...(byManager.get(id) ?? []));
+      }
+    }
+
     await trx.updateTable("employees").set({ [field]: value } as never).where("id", "=", emp.id).execute();
     await emit({ companyId: emp.company_id, type: "employee.updated", subjectId: emp.id, actor: { kind: "user" }, payload: { field } });
   });
@@ -52,10 +82,12 @@ export interface CreateEmployeeInput {
 }
 
 export async function createEmployee(ctx: RuntimeContext, input: CreateEmployeeInput): Promise<{ conversationId: string; employeeId: string }> {
+  const name = input.name.trim();
+  if (!name) throw new Error("employee name required");
   const conversationId = randomUUID();
   const employeeId = randomUUID();
   await mutate(ctx, async (trx, emit) => {
-    await trx.insertInto("conversations").values({ id: conversationId, company_id: input.companyId, kind: "dm", name: input.name }).execute();
+    await trx.insertInto("conversations").values({ id: conversationId, company_id: input.companyId, kind: "dm", name }).execute();
     await trx
       .insertInto("employees")
       .values({

@@ -1,5 +1,7 @@
 import { Gear, Plus, UsersThree } from "@phosphor-icons/react";
 import { useState } from "react";
+import { useAsyncAction } from "../hooks/useAsyncAction";
+import { useEscapeToClose } from "../hooks/useEscapeToClose";
 import { useResizableWidth } from "../hooks/useResizableWidth";
 import { useAgentActivity } from "../store/agentActivity";
 import { Conversation } from "../types";
@@ -49,20 +51,21 @@ export function Sidebar({
   const activeAgents = useAgentActivity((s) => s.active);
   const [creatingChannel, setCreatingChannel] = useState(false);
   const [channelName, setChannelName] = useState("");
-  const [creating, setCreating] = useState(false);
+  const [runCreateChannel, { busy: creating, error: createError }, clearCreateError] = useAsyncAction(
+    async (name: string) => {
+      await onCreateChannel(name);
+      setChannelName("");
+      setCreatingChannel(false);
+    },
+  );
 
   const submitChannel = async () => {
     const name = channelName.trim();
     if (!name || creating) return;
-    setCreating(true);
-    try {
-      await onCreateChannel(name);
-      setChannelName("");
-      setCreatingChannel(false);
-    } finally {
-      setCreating(false);
-    }
+    await runCreateChannel(name);
   };
+
+  useEscapeToClose(open, onClose);
 
   return (
     <>
@@ -73,6 +76,7 @@ export function Sidebar({
           <button
             className="sidebar-settings-btn sidebar-header-settings-btn"
             title="Company settings"
+            aria-label="Company settings"
             onClick={onOpenAppSettings}
           >
             <Gear />
@@ -82,7 +86,12 @@ export function Sidebar({
         <div className="sidebar-section">
           <div className="sidebar-section-title sidebar-section-title-row">
             <span>Channels</span>
-            <button className="sidebar-add-btn" title="Create channel" onClick={() => setCreatingChannel((v) => !v)}>
+            <button
+              className="sidebar-add-btn"
+              title="Create channel"
+              aria-label="Create channel"
+              onClick={() => setCreatingChannel((v) => !v)}
+            >
               <Plus />
             </button>
           </div>
@@ -109,13 +118,27 @@ export function Sidebar({
                 autoFocus
                 placeholder="new-channel"
                 value={channelName}
-                onChange={(e) => setChannelName(e.target.value.replace(/\s+/g, "-").toLowerCase())}
+                maxLength={80}
+                onChange={(e) => {
+                  // Restrict to a safe charset: markdown control characters ([ ] ( ) \)
+                  // in a channel name can break out of mention-link syntax elsewhere
+                  // in the app (report §2.4) — keep names to a plain slug.
+                  const clean = e.target.value
+                    .replace(/\s+/g, "-")
+                    .toLowerCase()
+                    .replace(/[^a-z0-9-]/g, "");
+                  setChannelName(clean);
+                }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") submitChannel();
-                  if (e.key === "Escape") setCreatingChannel(false);
+                  if (e.key === "Escape") {
+                    setCreatingChannel(false);
+                    clearCreateError();
+                  }
                 }}
                 disabled={creating}
               />
+              {createError && <p className="form-error">{createError}</p>}
             </div>
           )}
         </div>
@@ -124,10 +147,10 @@ export function Sidebar({
           <div className="sidebar-section-title sidebar-section-title-row">
             <span>Direct Messages</span>
             <span className="sidebar-section-actions">
-              <button className="sidebar-add-btn" title="New group" onClick={onOpenGroup}>
+              <button className="sidebar-add-btn" title="New group" aria-label="New group" onClick={onOpenGroup}>
                 <UsersThree />
               </button>
-              <button className="sidebar-add-btn" title="Find people" onClick={onOpenSearch}>
+              <button className="sidebar-add-btn" title="Find people" aria-label="Find people" onClick={onOpenSearch}>
                 <Plus />
               </button>
             </span>
@@ -163,6 +186,7 @@ export function Sidebar({
                   <button
                     className="sidebar-settings-btn"
                     title={`${c.name} settings`}
+                    aria-label={`${c.name} settings`}
                     onClick={(e) => {
                       e.stopPropagation();
                       onOpenSettings(c.id);

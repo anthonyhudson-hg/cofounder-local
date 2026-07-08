@@ -1,6 +1,8 @@
 import { X } from "@phosphor-icons/react";
 import { useRef, useState } from "react";
-import { readImageAsResizedDataUrl } from "../lib/avatar";
+import { useAsyncAction } from "../hooks/useAsyncAction";
+import { useEscapeToClose } from "../hooks/useEscapeToClose";
+import { usePhotoUpload } from "../hooks/usePhotoUpload";
 import { Company } from "../types";
 import { THEMES, applyTheme, themeForColor } from "../lib/themes";
 
@@ -8,7 +10,7 @@ interface Props {
   company: Company;
   onUpdateField: <K extends keyof Company>(field: K, value: Company[K]) => void;
   canDelete: boolean;
-  onDelete: () => void;
+  onDelete: () => Promise<void> | void;
   onClose: () => void;
 }
 
@@ -17,8 +19,8 @@ export function AppSettingsModal({ company, onUpdateField, canDelete, onDelete, 
   const [profile, setProfile] = useState(company.profile);
   const [systemPrompt, setSystemPrompt] = useState(company.system_prompt);
   const [savedFlash, setSavedFlash] = useState(false);
-  const [uploading, setUploading] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [avatarFailed, setAvatarFailed] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const isDirty =
@@ -32,27 +34,39 @@ export function AppSettingsModal({ company, onUpdateField, canDelete, onDelete, 
     setTimeout(() => setSavedFlash(false), 1500);
   };
 
+  // Discarding an unsaved company profile/system-prompt edit is hard to undo — confirm
+  // before closing instead of silently dropping it (report §5.8).
+  const requestClose = () => {
+    if (isDirty && !window.confirm("You have unsaved changes. Discard them?")) return;
+    onClose();
+  };
+
+  useEscapeToClose(true, requestClose);
+
+  const [runUpload, { busy: uploading, error: uploadError }] = usePhotoUpload((dataUrl) => {
+    onUpdateField("avatar", dataUrl);
+    setAvatarFailed(false);
+  });
+
   const handlePhotoSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file) return;
-    setUploading(true);
-    try {
-      const dataUrl = await readImageAsResizedDataUrl(file);
-      onUpdateField("avatar", dataUrl);
-    } finally {
-      setUploading(false);
-    }
+    await runUpload(file);
   };
+
+  const [runDelete, { busy: deleting, error: deleteError }] = useAsyncAction(async () => {
+    await onDelete();
+  });
 
   const initial = name.trim().charAt(0).toUpperCase() || "?";
 
   return (
-    <div className="modal-scrim" onClick={onClose}>
+    <div className="modal-scrim" onClick={requestClose}>
       <div className="modal app-settings-modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h3>Company settings</h3>
-          <button className="modal-close" onClick={onClose}>
+          <button className="modal-close" aria-label="Close" onClick={requestClose}>
             <X />
           </button>
         </div>
@@ -61,8 +75,13 @@ export function AppSettingsModal({ company, onUpdateField, canDelete, onDelete, 
           <div className="debug-field">
             <div className="debug-label">Icon</div>
             <div className="settings-avatar-row">
-              {company.avatar ? (
-                <img className="settings-avatar" src={company.avatar} alt={name} />
+              {company.avatar && !avatarFailed ? (
+                <img
+                  className="settings-avatar"
+                  src={company.avatar}
+                  alt={name}
+                  onError={() => setAvatarFailed(true)}
+                />
               ) : (
                 <span className="settings-avatar company-avatar-fallback" style={{ background: company.color ?? "#4a154b" }}>
                   {initial}
@@ -86,6 +105,7 @@ export function AppSettingsModal({ company, onUpdateField, canDelete, onDelete, 
                 />
               </div>
             </div>
+            {uploadError && <p className="form-error">Couldn't upload icon: {uploadError}</p>}
           </div>
 
           <div className="debug-field">
@@ -159,13 +179,14 @@ export function AppSettingsModal({ company, onUpdateField, canDelete, onDelete, 
                   chat history? This cannot be undone.
                 </p>
                 <div className="settings-save-row">
-                  <button className="settings-link-btn danger" onClick={onDelete}>
-                    Delete permanently
+                  <button className="settings-link-btn danger" disabled={deleting} onClick={runDelete}>
+                    {deleting ? "Deleting…" : "Delete permanently"}
                   </button>
-                  <button className="settings-link-btn" onClick={() => setConfirmDelete(false)}>
+                  <button className="settings-link-btn" disabled={deleting} onClick={() => setConfirmDelete(false)}>
                     Cancel
                   </button>
                 </div>
+                {deleteError && <p className="form-error">{deleteError}</p>}
               </div>
             ) : (
               <button

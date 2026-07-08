@@ -1,16 +1,43 @@
 import { Camera, CaretRight, Check, DiceFive, Hash, Plus, X } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
-import { readImageAsResizedDataUrl } from "../lib/avatar";
 import { buildIdentityBlock, composeSystemPrompt, resolveManagerName } from "../lib/promptBuilder";
 import { randomSillyName } from "../lib/sillyNames";
 import { Conversation, EFFORTS, Effort, Employee, MODELS, PROVIDERS, PROVIDER_LABELS, Responsibility } from "../types";
 import { useChannelMembership } from "../hooks/useChannelMembership";
 import { useDepartments } from "../hooks/useDepartments";
+import { useEscapeToClose } from "../hooks/useEscapeToClose";
+import { usePhotoUpload } from "../hooks/usePhotoUpload";
 import { useResizableWidth } from "../hooks/useResizableWidth";
 import { useResponsibilities } from "../hooks/useResponsibilities";
 import { useTokenCount } from "../hooks/useTokenCount";
 import { Avatar } from "./Avatar";
 import { EmployeeInfo } from "./MessageList";
+
+/**
+ * All employees transitively managed by `rootId` (i.e. its full reporting subtree),
+ * walked via BFS over `manager_employee_id`. A same-immediate-report check alone
+ * (`e.manager_employee_id !== rootId`) only blocks a 1-hop cycle — A managing C who
+ * already reports (via B) to A is a 2-hop cycle the old check let straight through
+ * (report §4.1).
+ */
+function descendantIds(rootId: string, employees: Employee[]): Set<string> {
+  const byManager = new Map<string, string[]>();
+  for (const e of employees) {
+    if (!e.manager_employee_id) continue;
+    const list = byManager.get(e.manager_employee_id);
+    if (list) list.push(e.id);
+    else byManager.set(e.manager_employee_id, [e.id]);
+  }
+  const seen = new Set<string>();
+  const queue = [...(byManager.get(rootId) ?? [])];
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    queue.push(...(byManager.get(id) ?? []));
+  }
+  return seen;
+}
 
 interface Props {
   conversation: Conversation;
@@ -40,16 +67,29 @@ function ResponsibilityRow({
 }) {
   const [text, setText] = useState(responsibility.text);
 
+  // Resync on either id OR text changing — depending on id alone meant a canonical
+  // text update from the server (same id) never propagated into the local draft (report §5.9).
   useEffect(() => {
     setText(responsibility.text);
-  }, [responsibility.id]);
+  }, [responsibility.id, responsibility.text]);
+
+  const commit = () => {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      // Don't persist an emptied-out responsibility; reset the draft back to the last
+      // saved value instead (report §5.9).
+      setText(responsibility.text);
+      return;
+    }
+    if (trimmed !== responsibility.text) onUpdate(responsibility.id, trimmed);
+  };
 
   return (
     <div className="responsibility-row">
       <input
         value={text}
         onChange={(e) => setText(e.target.value)}
-        onBlur={() => text !== responsibility.text && onUpdate(responsibility.id, text)}
+        onBlur={commit}
       />
       <button
         className="responsibility-remove"
@@ -88,7 +128,6 @@ export function EmployeeSettingsPanel({
   const [preamble, setPreamble] = useState(employee.preamble);
   const [additionalDetails, setAdditionalDetails] = useState(employee.additional_details);
   const [savedFlash, setSavedFlash] = useState(false);
-  const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const { responsibilities, add: addResponsibility, update: updateResponsibility, remove: removeResponsibility } =
@@ -138,10 +177,11 @@ export function EmployeeSettingsPanel({
     ? departmentNames
     : [employee.department, ...departmentNames].filter(Boolean);
 
-  // Exclude self and anyone who (directly) reports to this employee, to keep the
-  // manager chain from forming an immediate cycle.
+  // Exclude self and every transitive report (the whole reporting subtree, not just
+  // direct reports) so the manager chain can't form a cycle at any depth (report §4.1).
+  const excludedManagerIds = descendantIds(employee.id, employees);
   const managerOptions = employees.filter(
-    (e) => e.id !== employee.id && e.manager_employee_id !== employee.id,
+    (e) => e.id !== employee.id && !excludedManagerIds.has(e.id),
   );
 
   const handleDepartmentChange = (value: string) => {
@@ -178,18 +218,25 @@ export function EmployeeSettingsPanel({
 
   const handlePickPhoto = () => fileInputRef.current?.click();
 
+  const [runUpload, { busy: uploading, error: uploadError }] = usePhotoUpload((dataUrl) =>
+    onUpdateField("avatar", dataUrl),
+  );
+
   const handlePhotoSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file) return;
-    setUploading(true);
-    try {
-      const dataUrl = await readImageAsResizedDataUrl(file);
-      onUpdateField("avatar", dataUrl);
-    } finally {
-      setUploading(false);
-    }
+    await runUpload(file);
   };
+
+  // Editing preamble/mission/details is real, easy-to-lose work — confirm before
+  // discarding an unsaved edit on close (report §5.8).
+  const requestClose = () => {
+    if (isDirty && !window.confirm("You have unsaved changes. Discard them?")) return;
+    onClose();
+  };
+
+  useEscapeToClose(true, requestClose);
 
   const handleAddResponsibility = () => {
     if (!newResponsibility.trim()) return;
@@ -202,7 +249,7 @@ export function EmployeeSettingsPanel({
       <div className="resize-handle resize-handle-left" onMouseDown={onMouseDown} />
       <div className="settings-panel-header">
         <h3>Employee settings</h3>
-        <button className="modal-close" onClick={onClose}>
+        <button className="modal-close" aria-label="Close" onClick={requestClose}>
           <X />
         </button>
       </div>
@@ -211,7 +258,13 @@ export function EmployeeSettingsPanel({
         <div className="settings-hero">
           <div className="settings-hero-avatar-wrap">
             <Avatar name={name} avatar={employee.avatar} bot className="settings-avatar" />
-            <button className="settings-avatar-edit-btn" title="Change photo" onClick={handlePickPhoto} disabled={uploading}>
+            <button
+              className="settings-avatar-edit-btn"
+              title="Change photo"
+              aria-label="Change photo"
+              onClick={handlePickPhoto}
+              disabled={uploading}
+            >
               <Camera weight="fill" />
             </button>
             <input
@@ -245,6 +298,7 @@ export function EmployeeSettingsPanel({
               placeholder="Job title"
             />
             {uploading && <span className="settings-hint">Uploading photo…</span>}
+            {uploadError && <p className="form-error">Couldn't upload photo: {uploadError}</p>}
             {employee.avatar && !uploading && (
               <button className="settings-link-btn danger" onClick={() => onUpdateField("avatar", null)}>
                 Remove photo

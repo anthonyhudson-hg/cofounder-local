@@ -8,7 +8,7 @@ Severity key: **CRITICAL** (data loss / total feature death) · **HIGH** (real, 
 
 ## Part 0 — If you fix nothing else, fix these
 
-1. **Every sidecar/runtime IPC call can hang forever, with zero timeout, anywhere in the stack.** (§1.1)
+1. [x] **DONE** — **Every sidecar/runtime IPC call can hang forever, with zero timeout, anywhere in the stack.** (§1.1)
 2. **The vault's fallback master key gets written to the OS temp directory.** Wipe temp, lose every secret permanently. (§2.1)
 3. **The GitHub tool lets an agent point `git add -A && git push` at any directory on disk and exfiltrate it with a stored PAT**, and the human approval prompt shows raw JSON, not a diff. (§2.2)
 4. **CSP is fully disabled** (`"csp": null`) in an app that renders LLM-generated (and thus prompt-injectable) markdown. (§2.3)
@@ -24,7 +24,10 @@ Severity key: **CRITICAL** (data loss / total feature death) · **HIGH** (real, 
 
 These patterns repeat across many files. Fix the pattern once instead of patching each call site.
 
-### 1.1 — No timeout anywhere in the sidecar/runtime request-response layer — CRITICAL
+### 1.1 — No timeout anywhere in the sidecar/runtime request-response layer — CRITICAL — ✅ DONE
+
+**Fix applied:** `sidecarBus.ts`'s `registerRequestHandler` now arms a per-id idle timer (default 90s) that resets on every event delivered for that id (including `delta`), and synthesizes a `{type:"error"}` event + auto-unregisters on expiry instead of hanging forever; `sidecarRequest.ts`'s `invokeAndWait` takes an explicit `timeoutMs` (30s for relevance checks, 120s for a full channel turn). `runtimeClient.ts`'s `send()`/`command()`/`query()` got the equivalent treatment (30s default, 120s idle-reset for `commandStreaming`), plus per-listener try/catch isolation in the event dispatch loop. `useChannel.ts` and `useConversation.ts` were also fixed for the related §1.2 issue (see below) since a timeout without error handling just turns a hang into an unhandled rejection.
+
 **Where:** `src/lib/runtimeClient.ts` (`pending` map, lines ~90-98), `src/lib/sidecarBus.ts` (`registerRequestHandler`, lines ~43-49), `src/lib/sidecarRequest.ts` (`invokeAndWait`, lines 4-19), and downstream every caller: `useChannel.ts` (relevance-check `Promise.all`, lines 100-118 and the send flow, 134-214), `useConversation.ts` (streaming send, 174-183), `useTokenCount.ts` (11-33), `src-tauri/src/sidecar.rs` (`write_request`/`send_to_runtime` have no read-side timeout either).
 
 **Failure scenario:** the sidecar or runtime process hangs, crashes without flushing a final message, or simply never emits a matching response id (a real risk given `sidecar/src/runtime/index.ts` can drop the `id` field entirely on a malformed inbound message — see §3.3). The awaiting promise on the frontend never resolves or rejects. `sending`/loading flags get stuck `true` forever. The most concrete instance: `useChannel.send()`'s relevance-check `Promise.all` (one `cos_check_relevance` call per channel member) hangs the *entire send flow* for that channel if even one member's relevance check never returns — with no error, no way to retry short of restarting the app.
