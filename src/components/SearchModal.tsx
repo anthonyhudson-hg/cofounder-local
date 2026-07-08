@@ -1,5 +1,6 @@
 import { X } from "@phosphor-icons/react";
 import { useMemo, useState } from "react";
+import { useEscapeToClose } from "../hooks/useEscapeToClose";
 import { Conversation, Employee } from "../types";
 import { Avatar } from "./Avatar";
 
@@ -28,12 +29,19 @@ export function SearchModal({ entries, onSelect, onClose }: Props) {
     );
   }, [entries, query]);
 
+  useEscapeToClose(true, onClose);
+
+  const selectAndClose = (conversationId: string) => {
+    onSelect(conversationId);
+    onClose();
+  };
+
   return (
     <div className="modal-scrim" onClick={onClose}>
       <div className="modal search-modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h3>Find people</h3>
-          <button className="modal-close" onClick={onClose}>
+          <button className="modal-close" aria-label="Close" onClick={onClose}>
             <X />
           </button>
         </div>
@@ -44,6 +52,13 @@ export function SearchModal({ entries, onSelect, onClose }: Props) {
             placeholder="Search by name, title, or department…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              // Enter selects the top match — matches the quick-switcher pattern this
+              // clearly emulates (report §5.9).
+              if (e.key === "Enter" && filtered.length > 0) {
+                selectAndClose(filtered[0].conversation.id);
+              }
+            }}
           />
           <div className="search-modal-results">
             {filtered.length === 0 && <div className="search-modal-empty">No one matches "{query}".</div>}
@@ -51,10 +66,7 @@ export function SearchModal({ entries, onSelect, onClose }: Props) {
               <button
                 key={conversation.id}
                 className="search-modal-row"
-                onClick={() => {
-                  onSelect(conversation.id);
-                  onClose();
-                }}
+                onClick={() => selectAndClose(conversation.id)}
               >
                 <Avatar name={conversation.name} avatar={employee.avatar} bot className="search-modal-avatar" />
                 <div className="search-modal-row-text">

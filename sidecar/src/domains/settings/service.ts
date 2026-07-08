@@ -1,17 +1,5 @@
 import type { RuntimeContext } from "../../runtime/context";
-
-async function getSetting(ctx: RuntimeContext, key: string): Promise<string | null> {
-  const row = await ctx.db.selectFrom("settings").where("key", "=", key).select("value").executeTakeFirst();
-  return row?.value ?? null;
-}
-
-async function setSetting(ctx: RuntimeContext, key: string, value: string): Promise<void> {
-  await ctx.db
-    .insertInto("settings")
-    .values({ key, value })
-    .onConflict((oc) => oc.column("key").doUpdateSet({ value }))
-    .execute();
-}
+import { getSetting, setSetting } from "./kv";
 
 export async function getUserProfile(ctx: RuntimeContext): Promise<{ userFullName: string }> {
   return { userFullName: (await getSetting(ctx, "user_full_name")) ?? "" };

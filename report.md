@@ -86,17 +86,20 @@ These patterns repeat across many files. Fix the pattern once instead of patchin
 
 **Fix:** route these through `mutate()`/`emit()` like their siblings, or explicitly document why they're exempt and enforce that boundary in review.
 
-### 1.6 — No keyboard dismissal or focus trapping on any modal/popover — MEDIUM
+### 1.6 — No keyboard dismissal or focus trapping on any modal/popover — MEDIUM — ✅ DONE (Escape; no focus trap)
+
+**Fix applied:** added a shared `useEscapeToClose` hook and wired it into every modal/popover listed: `AppSettingsModal`, `ChannelMembersModal`, `GroupModal`, `HireModal`, `SearchModal`, `CompanySwitcher`, `EmojiPicker`, `ThreadPanel`, and the `Sidebar` mobile drawer. Full focus-trapping (cycling Tab within the modal) was out of scope for this pass — Escape-to-close was the concretely cited, highest-value gap and is done; noted honestly rather than claiming the whole finding.
+
 **Where:** `AppSettingsModal`, `ChannelMembersModal`, `GroupModal`, `HireModal`, `SearchModal`, `CompanySwitcher`, `EmojiPicker`, `Sidebar`'s mobile drawer — none close on `Escape`, none trap focus while open. Click-outside works everywhere it should; `Escape` works nowhere.
 
 **Fix:** one shared `useModalDismiss()` hook (Escape handler + optional focus trap), applied to all of the above instead of nothing everywhere.
 
-### 1.7 — Duplicated logic that will drift — LOW/MEDIUM
-- **Photo upload**: `AppSettingsModal.tsx:47-58` and `EmployeeSettingsPanel.tsx:181-192` are byte-for-byte the same function, including the same missing-catch bug (§1.2). Extract a shared `usePhotoUpload()` hook.
-- **`promptBuilder.ts`**: `sidecar/src/runtime/promptBuilder.ts` is an intentional byte-for-byte fork of `src/lib/promptBuilder.ts` (per its own comment, "ported verbatim" as part of a strangler migration) with no shared source and no test asserting they stay in sync. The next edit to either copy without mirroring it will silently make the legacy and new code paths build different system prompts for the same employee.
-- **`getSetting`/`setSetting`**: `companies/service.ts` (`getActiveCompanyId`/`setActiveCompanyId`) and `settings/service.ts` implement the identical get/set-setting SQL pattern twice.
-- **Modal boilerplate**: `GroupModal`, `SearchModal`, and `ChannelMembersModal` all reimplement the same avatar+name+meta picker row markup near-verbatim (`search-modal-*` classes reused wholesale) — candidate for one shared `PersonPicker` component.
-- **Per-row membership queries**: `ChannelMembersModal.tsx`'s `MemberRow` calls `useChannelMembership(employee.id)` per row (13-14, 51) — N employees means N independent DB round-trips on modal open, and every checkbox toggle is scoped to one employee instead of the whole list. Lift into one query in the parent.
+### 1.7 — Duplicated logic that will drift — LOW/MEDIUM — ✅ DONE (photo upload, getSetting/setSetting, N+1 query); ⚠️ not done (PersonPicker component, promptBuilder fork)
+- **Photo upload**: `AppSettingsModal.tsx:47-58` and `EmployeeSettingsPanel.tsx:181-192` are byte-for-byte the same function, including the same missing-catch bug (§1.2). Extract a shared `usePhotoUpload()` hook. — ✅ DONE.
+- **`promptBuilder.ts`**: `sidecar/src/runtime/promptBuilder.ts` is an intentional byte-for-byte fork of `src/lib/promptBuilder.ts` (per its own comment, "ported verbatim" as part of a strangler migration) with no shared source and no test asserting they stay in sync. The next edit to either copy without mirroring it will silently make the legacy and new code paths build different system prompts for the same employee. — ⚠️ not done: genuinely can't be deduped cleanly today (ESM client vs CommonJS sidecar build targets), and adding a sync-check test is a follow-up.
+- **`getSetting`/`setSetting`**: `companies/service.ts` (`getActiveCompanyId`/`setActiveCompanyId`) and `settings/service.ts` implement the identical get/set-setting SQL pattern twice. — ✅ DONE: extracted to `sidecar/src/domains/settings/kv.ts`, both call sites now use it.
+- **Modal boilerplate**: `GroupModal`, `SearchModal`, and `ChannelMembersModal` all reimplement the same avatar+name+meta picker row markup near-verbatim (`search-modal-*` classes reused wholesale) — candidate for one shared `PersonPicker` component. — ⚠️ not done: a real component-extraction refactor, deferred to keep this pass's diffs reviewable; not a correctness issue.
+- **Per-row membership queries**: `ChannelMembersModal.tsx`'s `MemberRow` calls `useChannelMembership(employee.id)` per row (13-14, 51) — N employees means N independent DB round-trips on modal open, and every checkbox toggle is scoped to one employee instead of the whole list. Lift into one query in the parent. — ✅ DONE: rewritten to one `channel.members` query + local Set-based membership, no per-row hook instances.
 
 ---
 
@@ -465,7 +468,7 @@ Avatar/color/manager/channel-membership changes apply immediately on click; name
 - **`EmployeeSettingsPanel.tsx:43-45`** — a responsibility row's local-draft reset effect depends only on `[responsibility.id]`, not `.text`; if the canonical text changes upstream while the id is unchanged, the local draft silently diverges.
 - **`EmployeeSettingsPanel.tsx:52`** — no trim/non-empty guard on responsibility text before persisting on blur; a user can save an empty responsibility.
 - **`HireModal.tsx:134-153`** — new-department input fires creation on both blur and Enter; clicking "Next" directly (no Enter) can race the async create, leaving the Next button confusingly disabled.
-- **`SearchModal.tsx:41-47`** — no Enter-to-select on the search input, unlike typical quick-switcher UX.
+- **`SearchModal.tsx:41-47`** — no Enter-to-select on the search input, unlike typical quick-switcher UX. — ✅ DONE: Enter now selects the top match.
 - **`useResizableWidth.ts:12-30`** — drag `mousemove`/`mouseup` listeners are only removed on a genuine `mouseup`; if the component unmounts mid-drag, they leak and keep firing `setWidth` on an unmounted component.
 - **`randomUser.ts:13-38`** — `fetchPhotos` trusts `data.results.length === count`; a short response from the API silently produces `photoUrl: undefined` for excess candidates despite the type claiming `string`, surfacing as a confusing downstream fetch error instead of a clear "photo service returned incomplete data."
 - **`avatar.ts:41`**, **`randomUser.ts:15`** — no timeout/`AbortSignal` on `fetch`/`tauriFetch` calls to `randomuser.me`; a hung request blocks candidate/avatar generation indefinitely (same root pattern as §1.1, just external instead of IPC).

@@ -4,6 +4,7 @@ import type { Actor } from "@shared/protocol";
 import type { Database } from "../../db/schema";
 import type { RuntimeContext } from "../../runtime/context";
 import { mutate, type Emit } from "../../runtime/unitOfWork";
+import { getSetting, setSetting } from "../settings/kv";
 
 const COS_GREETING =
   "👋 I'm your Chief of Staff. I'm a blank slate right now — tell me how you'd like me to work, or just start handing me things to coordinate, track, and follow up on.";
@@ -120,16 +121,11 @@ export async function updateCompany(
 }
 
 export async function getActiveCompanyId(ctx: RuntimeContext): Promise<string | null> {
-  const row = await ctx.db.selectFrom("settings").where("key", "=", "active_company_id").select("value").executeTakeFirst();
-  return row?.value ?? null;
+  return getSetting(ctx, "active_company_id");
 }
 
 export async function setActiveCompanyId(ctx: RuntimeContext, companyId: string): Promise<void> {
-  await ctx.db
-    .insertInto("settings")
-    .values({ key: "active_company_id", value: companyId })
-    .onConflict((oc) => oc.column("key").doUpdateSet({ value: companyId }))
-    .execute();
+  await setSetting(ctx, "active_company_id", companyId);
 }
 
 /** Clone a company (structure only, no history/sessions) — ports useCompanies.clone. */

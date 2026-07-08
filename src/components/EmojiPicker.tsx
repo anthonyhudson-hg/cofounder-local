@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { useEscapeToClose } from "../hooks/useEscapeToClose";
 import { EMOJI_CATEGORIES } from "../lib/emoji";
 import { Emoji } from "./Emoji";
 
@@ -17,6 +18,8 @@ export function EmojiPicker({ onPick, onClose }: Props) {
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [onClose]);
+
+  useEscapeToClose(true, onClose);
 
   return (
     <div className="emoji-picker" ref={ref}>
