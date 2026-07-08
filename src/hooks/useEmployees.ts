@@ -1,17 +1,22 @@
 import { useCallback, useEffect, useState } from "react";
 import { Employee } from "../types";
 import { onRuntimeEvent, query } from "../lib/runtimeClient";
+import { useStaleGuard } from "./useStaleGuard";
 
 export function useEmployees(companyId: string | null) {
   const [employees, setEmployees] = useState<Employee[]>([]);
+  const { begin, isCurrent } = useStaleGuard();
 
   const reload = useCallback(async () => {
+    const token = begin();
     if (!companyId) {
-      setEmployees([]);
+      if (isCurrent(token)) setEmployees([]);
       return;
     }
-    setEmployees(await query<Employee[]>("employees.list", {}, companyId));
-  }, [companyId]);
+    const rows = await query<Employee[]>("employees.list", {}, companyId);
+    if (!isCurrent(token)) return; // report §1.3: a newer reload superseded this one
+    setEmployees(rows);
+  }, [companyId, begin, isCurrent]);
 
   useEffect(() => {
     reload();

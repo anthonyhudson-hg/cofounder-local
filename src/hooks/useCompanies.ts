@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Company } from "../types";
 import { command, onRuntimeEvent, query } from "../lib/runtimeClient";
+import { useStaleGuard } from "./useStaleGuard";
 
 /**
  * Company list + lifecycle, now backed entirely by the runtime (was
@@ -9,12 +10,16 @@ import { command, onRuntimeEvent, query } from "../lib/runtimeClient";
  */
 export function useCompanies() {
   const [companies, setCompanies] = useState<Company[]>([]);
+  const { begin, isCurrent } = useStaleGuard();
 
   const reload = useCallback(async () => {
+    const token = begin();
     const rows = await query<Company[]>("companies.list", {}, null);
-    setCompanies(rows);
+    // A burst of company.* events can fire overlapping reloads; only commit the
+    // most recently started one (report §1.3).
+    if (isCurrent(token)) setCompanies(rows);
     return rows;
-  }, []);
+  }, [begin, isCurrent]);
 
   useEffect(() => {
     reload();

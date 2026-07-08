@@ -53,7 +53,10 @@ These patterns repeat across many files. Fix the pattern once instead of patchin
 
 **Fix:** this is exactly the shape of a shared hook. Write one `useAsyncAction()` (or a thin wrapper around `command()`/`query()`) that captures thrown errors into a returned `{ error, run, busy }` triple, and migrate every one of the above call sites to it. Stop patching this file-by-file.
 
-### 1.3 — Async "reload" race conditions (stale response overwrites fresh state) — HIGH
+### 1.3 — Async "reload" race conditions (stale response overwrites fresh state) — HIGH — ✅ DONE
+
+**Fix applied:** added a shared `useStaleGuard` hook (`src/hooks/useStaleGuard.ts`) — `begin()`/`isCurrent(token)` around a generation counter — and applied it to every reload function listed: `useConversations`, `useEmployees`, `useDepartments`, `useEmployee`, `useActiveCompany`, `useCompanies`, and `useChannel`/`useConversation` (separate guards per reload target — messages, members, reactions — so an unrelated concurrent fetch can't spuriously invalidate a different one). An out-of-order response now gets silently discarded instead of committing stale state over fresher state.
+
 **Where:** `useConversations.ts` (9-23), `useEmployees.ts`, `useDepartments.ts`, `useEmployee.ts`, `useActiveCompany.ts`, `useCompanies.ts`, `useChannel.ts` (41-52), `useConversation.ts` (44-54) — essentially every list/detail hook that reloads on an id/company change.
 
 **Failure scenario:** none of these hooks are remounted per-conversation/per-company (confirmed: `ChatPane` renders without a `key`, and `useConversations`/`useEmployees`/etc. mount once at `App.tsx`'s top level). A `reload()` closure captures the id at creation time and unconditionally calls `setState(rows)` when its promise resolves — with no guard comparing "is this response still for the currently-selected id." Click company A, then B before A's `conversations.list` resolves, and A's slower response can land after B's, transiently showing company A's channel list while `companyId` state already says B. This is a real, easily user-triggered bug in a Slack-style UI meant for rapid switching, not a theoretical race. `React.StrictMode`'s double-invoked effects make it easy to hit in dev, too.

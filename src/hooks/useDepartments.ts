@@ -1,17 +1,22 @@
 import { useCallback, useEffect, useState } from "react";
 import { Department } from "../types";
 import { command, onRuntimeEvent, query } from "../lib/runtimeClient";
+import { useStaleGuard } from "./useStaleGuard";
 
 export function useDepartments(companyId: string | null) {
   const [departments, setDepartments] = useState<Department[]>([]);
+  const { begin, isCurrent } = useStaleGuard();
 
   const reload = useCallback(async () => {
+    const token = begin();
     if (!companyId) {
-      setDepartments([]);
+      if (isCurrent(token)) setDepartments([]);
       return;
     }
-    setDepartments(await query<Department[]>("departments.list", {}, companyId));
-  }, [companyId]);
+    const rows = await query<Department[]>("departments.list", {}, companyId);
+    if (!isCurrent(token)) return; // report §1.3: a newer reload superseded this one
+    setDepartments(rows);
+  }, [companyId, begin, isCurrent]);
 
   useEffect(() => {
     reload();

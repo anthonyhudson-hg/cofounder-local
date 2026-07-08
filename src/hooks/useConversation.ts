@@ -8,6 +8,7 @@ import { consumeReactionNotices, formatReactionNotices } from "../lib/reactionNo
 import { useAgentActivity } from "../store/agentActivity";
 import { REACTOR_USER } from "../types";
 import { DebugPayload, Effort, Employee, Message, Reaction, modelProvider } from "../types";
+import { useStaleGuard } from "./useStaleGuard";
 
 export interface ReplyTarget {
   messageId: string;
@@ -29,6 +30,11 @@ export function useConversation(
   const [reactions, setReactions] = useState<Record<string, string[]>>({});
   const [sending, setSending] = useState(false);
   const messagesRef = useRef<Message[]>([]);
+  // This hook is not remounted per conversationId (no `key` on ChatPane), so a fast DM
+  // switch can otherwise let an older conversation's slower response land after the new
+  // one's and briefly show the wrong conversation's data (report §1.3).
+  const reactionsGuard = useStaleGuard();
+  const messagesGuard = useStaleGuard();
 
   const applyPatch = useCallback((id: string, patch: Partial<Message>) => {
     messagesRef.current = messagesRef.current.map((m) => (m.id === id ? { ...m, ...patch } : m));
@@ -36,19 +42,24 @@ export function useConversation(
   }, []);
 
   const reloadReactions = useCallback(async () => {
+    const token = reactionsGuard.begin();
     const rows = await query<Reaction[]>("reactions.list", { conversationId }, null);
+    if (!reactionsGuard.isCurrent(token)) return;
     const grouped: Record<string, string[]> = {};
     for (const r of rows) (grouped[r.message_id] ??= []).push(r.emoji);
     setReactions(grouped);
-  }, [conversationId]);
+  }, [conversationId, reactionsGuard]);
 
   const reload = useCallback(async () => {
+    const token = messagesGuard.begin();
     const rows = await query<Message[]>("messages.list", { conversationId }, null);
+    const replyCountRows = await query<Record<string, number>>("messages.replyCounts", { conversationId }, null);
+    if (!messagesGuard.isCurrent(token)) return;
     messagesRef.current = rows;
     setMessages(rows);
-    setReplyCounts(await query<Record<string, number>>("messages.replyCounts", { conversationId }, null));
+    setReplyCounts(replyCountRows);
     await reloadReactions();
-  }, [conversationId, reloadReactions]);
+  }, [conversationId, reloadReactions, messagesGuard]);
 
   useEffect(() => {
     reload();
