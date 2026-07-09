@@ -1,6 +1,7 @@
-import { ArrowBendUpLeft, CaretRight, DotsThreeVertical, Plus } from "@phosphor-icons/react";
+import { ArrowBendUpLeft, CaretRight, CircleNotch, DotsThreeVertical, Plus } from "@phosphor-icons/react";
 import { memo, useEffect, useRef, useState } from "react";
 import { QUICK_REACTIONS } from "../lib/emoji";
+import { activityStatusText, type LiveActivity } from "../lib/liveActivity";
 import { MentionTarget } from "../lib/mentions";
 import { Message, modelLabel } from "../types";
 import { Avatar } from "./Avatar";
@@ -8,6 +9,73 @@ import { DebugPanel } from "./DebugPanel";
 import { Emoji } from "./Emoji";
 import { EmojiPicker } from "./EmojiPicker";
 import { MarkdownContent } from "./MarkdownContent";
+
+/** Re-renders every second while `active` so the "N ago" line stays live without
+ *  the server having to stream a status per second (Paperclip's useLiveElapsed). */
+function useNowTick(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [active]);
+  return now;
+}
+
+/** Blue "Running" pill shown next to an agent's name while its turn is in flight. */
+export function RunningBadge() {
+  return (
+    <span className="running-badge">
+      <CircleNotch className="running-badge-spinner" weight="bold" />
+      Running
+    </span>
+  );
+}
+
+/** The live "Working… / Using X · N ago" block — a shimmering verb over a ticking
+ *  status subtitle. Mirrors Paperclip's run runtime-status line. */
+export function AgentActivityBlock({ activity }: { activity: LiveActivity }) {
+  const now = useNowTick(true);
+  const statusText = activityStatusText(activity, now);
+  return (
+    <div className="agent-activity">
+      <CircleNotch className="agent-activity-spinner" weight="bold" />
+      <div className="agent-activity-text">
+        <span className="shimmer-text agent-activity-verb">Working</span>
+        {statusText && <span className="agent-activity-status">{statusText}</span>}
+      </div>
+    </div>
+  );
+}
+
+/** A synthetic row for a turn that has no message row yet: a channel responder
+ *  before it posts, the channel relevance gate (no `name`), or any other window
+ *  watching a turn it didn't initiate. Renders like a message row. */
+export function AgentWorkingRow({ name, avatar, activity }: { name?: string; avatar?: string | null; activity: LiveActivity }) {
+  if (!name) {
+    // Conversation-level status (e.g. "Checking who should respond") — no agent.
+    return (
+      <div className="message-row agent-working-row conversation-activity">
+        <div className="message-body">
+          <AgentActivityBlock activity={activity} />
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="message-row agent-working-row">
+      <Avatar name={name} avatar={avatar ?? null} bot />
+      <div className="message-body">
+        <div className="message-meta">
+          <span className="message-author">{name}</span>
+          <RunningBadge />
+        </div>
+        <AgentActivityBlock activity={activity} />
+      </div>
+    </div>
+  );
+}
 
 interface Props {
   message: Message;
@@ -30,17 +98,9 @@ interface Props {
   // comparison even if MessageList recomputes it fresh every render.
   replyAuthorName?: string;
   replySnippet?: string;
-  /** Raw tool name (e.g. "mcp__cofounder__memory_write") while this message is
-   *  actively calling it — see useConversation's "tool" delta channel. */
-  activeToolName?: string;
-}
-
-/** "mcp__cofounder__memory_write" -> "Memory write" — strips the MCP server
- *  prefix so tool activity reads like a short verb phrase, not an internal id. */
-function friendlyToolName(raw: string): string {
-  const short = raw.startsWith("mcp__") ? raw.split("__").pop() ?? raw : raw;
-  const words = short.replace(/[_.]/g, " ").trim();
-  return words.charAt(0).toUpperCase() + words.slice(1);
+  /** Live "what is this agent doing right now" status for this message, while its
+   *  turn is in flight — server-authored, see store/agentStatus.ts. */
+  activity?: LiveActivity;
 }
 
 function formatTime(iso: string): string {
@@ -77,7 +137,7 @@ function MessageRowImpl({
   onReply,
   replyAuthorName,
   replySnippet,
-  activeToolName,
+  activity,
 }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -111,7 +171,7 @@ function MessageRowImpl({
       <div className="message-body">
         <div className="message-meta">
           <span className="message-author">{displayName}</span>
-          <span className="message-time">{formatTime(m.created_at)}</span>
+          {activity ? <RunningBadge /> : <span className="message-time">{formatTime(m.created_at)}</span>}
           {modelEffortLine && <span className="message-model-effort">{modelEffortLine}</span>}
         </div>
         {replyAuthorName && (
@@ -121,13 +181,8 @@ function MessageRowImpl({
         )}
         <div className="message-content">
           <MarkdownContent content={m.content} targets={mentionTargets} onMentionClick={onMentionClick} />
-          {m.status === "streaming" && <span className="streaming-cursor" />}
-          {m.status === "streaming" && activeToolName && (
-            <div className="tool-activity">
-              <span className="tool-activity-spinner" />
-              Using {friendlyToolName(activeToolName)}…
-            </div>
-          )}
+          {m.status === "streaming" && m.content.length > 0 && <span className="streaming-cursor" />}
+          {activity && (m.content.length === 0 || activity.toolName) && <AgentActivityBlock activity={activity} />}
           {m.status === "pending" && <span className="message-queued">Queued…</span>}
           {m.status === "error" && <div className="message-error">Error: {m.error_message}</div>}
         </div>

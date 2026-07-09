@@ -1,7 +1,18 @@
-import { DebugPayload, Message, modelLabel } from "../types";
+import { ActivityLogEntry, DebugPayload, Message, modelLabel } from "../types";
 
 interface Props {
   message: Message;
+}
+
+function formatStepTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) + `.${String(d.getMilliseconds()).padStart(3, "0")}`;
+}
+
+function stepLabel(e: ActivityLogEntry): string {
+  const primary = e.toolName ? `Using ${e.toolName}` : e.message || e.phase;
+  return e.snippet ? `${primary} — "${e.snippet}"` : primary;
 }
 
 export function DebugPanel({ message }: Props) {
@@ -18,6 +29,14 @@ export function DebugPanel({ message }: Props) {
 
   return (
     <div className="debug-inline">
+      {payload.activityLog && payload.activityLog.length > 0 && (
+        <div className="debug-inline-section">
+          <div className="debug-inline-key">Activity timeline ({payload.activityLog.length} steps)</div>
+          <pre className="debug-pre debug-activity-log">
+            {payload.activityLog.map((e) => `${formatStepTime(e.at)}  ${stepLabel(e)}`).join("\n")}
+          </pre>
+        </div>
+      )}
       <div className="debug-inline-row">
         <span className="debug-inline-key">Model</span>
         <span>

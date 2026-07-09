@@ -152,6 +152,20 @@ export interface ChannelDebugMeta {
   reactionsApplied: { messageId: string; emoji: string }[];
 }
 
+/** One entry in a turn's behind-the-scenes activity timeline (see the debug view). */
+export interface ActivityLogEntry {
+  /** ISO timestamp of this step. */
+  at: string;
+  /** Machine phase: thinking | tool | relevance | writing | approval | done. */
+  phase: string;
+  /** Human status ("Thinking", "Receiving agent output"). */
+  message: string;
+  /** Friendly tool name when phase === "tool". */
+  toolName?: string | null;
+  /** A short preview of what the agent had produced at this point, if any. */
+  snippet?: string | null;
+}
+
 export interface DebugPayload {
   model: string;
   effort: Effort;
@@ -167,6 +181,8 @@ export interface DebugPayload {
   resumeSessionId: string | null;
   sentAt: string;
   channel?: ChannelDebugMeta;
+  /** Chronological record of every live-activity status the turn emitted. */
+  activityLog?: ActivityLogEntry[];
 }
 
 export type Provider = "claude" | "codex";

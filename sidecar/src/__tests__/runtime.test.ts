@@ -19,6 +19,7 @@ import { companyWorkspaceRoot } from "../connectors/workspace";
 import { buildMemoryWriteToolDef } from "../providers/claudeMemoryTool";
 import { buildMessageSendToolDef } from "../providers/claudeMessageSendTool";
 import { ZERO_USAGE, type AgentProvider, type TurnResult } from "../providers";
+import type { AgentStatus } from "@shared/protocol";
 
 function freshCtx(): RuntimeContext {
   const p = path.join(os.tmpdir(), `cf-test-${randomUUID()}.db`);
@@ -1220,6 +1221,42 @@ test("checkProviderHealth: with nothing detected, pings — success is available
   assert.equal(codex.available, false);
   assert.match(codex.detail, /invalid api key/, "a failed ping surfaces the provider's own error message");
   assert.equal(health.anyAvailable, true, "one working provider is enough");
+});
+
+test("sendMessage (DM): broadcasts live agent status through the turn (thinking → tool → writing → done)", async () => {
+  const { sendMessage } = await import("../domains/conversations/service");
+  const ctx = freshCtx();
+  const { id: companyId } = await createCompany(ctx, { name: "A" }, { kind: "user" });
+  const cos = await ctx.db
+    .selectFrom("employees")
+    .where("company_id", "=", companyId)
+    .select(["id", "conversation_id"])
+    .executeTakeFirstOrThrow();
+
+  const statuses: AgentStatus[] = [];
+  ctx.bus.subscribeStatus((s) => statuses.push(s));
+
+  const provider = {
+    async *runTurn() {
+      yield { kind: "tool", name: "mcp__cofounder__memory_write", phase: "start" };
+      yield { kind: "tool", name: "mcp__cofounder__memory_write", phase: "end" };
+      yield { kind: "text", text: "On it." };
+      return { sessionId: null, success: true, usage: ZERO_USAGE, totalCostUsd: 0 };
+    },
+  };
+
+  await sendMessage(ctx, { companyId, conversationId: cos.conversation_id, text: "hi" }, { delta: () => {} }, provider as never);
+
+  const phases = statuses.map((s) => s.phase);
+  assert.ok(phases.includes("thinking"), "emits a thinking status before the provider runs");
+  const toolStatus = statuses.find((s) => s.phase === "tool");
+  assert.ok(toolStatus, "emits a tool status when a tool call starts");
+  assert.equal(toolStatus!.toolName, "Memory write", "tool status carries the friendly tool name");
+  assert.ok(phases.includes("writing"), "emits a writing status while producing text");
+  assert.ok(statuses.every((s) => s.employeeId === cos.id), "DM statuses are keyed to the responding employee");
+  assert.equal(statuses[statuses.length - 1].done, true, "emits a terminal done status so the client clears the indicator");
+
+  await ctx.db.destroy();
 });
 
 // keep tmp dir from filling forever in CI

@@ -7,6 +7,7 @@ import type {
   ResultEnvelope,
   RuntimeOutbound,
 } from "@shared/protocol";
+import { useAgentStatusStore } from "../store/agentStatus";
 
 /**
  * Typed client for the agent runtime (refactor #2/#7). Sends Commands/Queries
@@ -95,6 +96,12 @@ export function startRuntimeBus(): Promise<void> {
             console.error("onRuntimeEvent listener threw", err);
           }
         }
+        break;
+      case "status":
+        // Ephemeral live-activity status broadcast to every window (see the
+        // runtime's agentStatus.ts). Routed straight into the store rather than
+        // through a request id — it belongs to no specific command.
+        useAgentStatusStore.getState().apply(msg.status);
         break;
       case "delta": {
         touchPending(msg.id);

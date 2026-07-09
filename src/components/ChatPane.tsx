@@ -1,15 +1,56 @@
 import { Hash, UsersThree } from "@phosphor-icons/react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { AgentStatus } from "@shared/protocol";
 import { useChannel } from "../hooks/useChannel";
 import { useChannelMembership } from "../hooks/useChannelMembership";
 import { useConversation } from "../hooks/useConversation";
+import type { LiveActivity } from "../lib/liveActivity";
 import { MentionTarget, scopedMentionTargets } from "../lib/mentions";
+import { toLiveActivity, useConversationStatuses } from "../store/agentStatus";
 import { Conversation, DEFAULT_MODEL_ID, Effort, Employee, Message } from "../types";
 import { Avatar } from "./Avatar";
 import { ChannelMembersModal } from "./ChannelMembersModal";
 import { Composer } from "./Composer";
-import { EmployeeInfo, MessageList } from "./MessageList";
+import { EmployeeInfo, MessageList, type PendingActivity } from "./MessageList";
 import { ThreadPanel } from "./ThreadPanel";
+
+/**
+ * Split the live agent statuses for a conversation into (a) the activity for a
+ * streaming assistant message already on screen (keyed to the row by author),
+ * and (b) "pending" statuses that have no row yet — a channel responder before
+ * it posts, the relevance gate (no employee), or a turn another window started —
+ * rendered as synthetic working rows.
+ */
+function deriveActivityRows(
+  messages: Message[],
+  statuses: Record<string, AgentStatus>,
+  employeesById: Record<string, EmployeeInfo>,
+): { activityFor: (m: Message) => LiveActivity | undefined; pendingActivities: PendingActivity[] } {
+  const streamingEmployees = new Set(
+    messages
+      .filter((m) => m.role === "assistant" && m.status === "streaming" && m.author_employee_id)
+      .map((m) => m.author_employee_id as string),
+  );
+  const activityFor = (m: Message): LiveActivity | undefined => {
+    // Only the CURRENTLY-streaming message shows the live status. Keying by author
+    // alone attached the badge/"Working" block to that employee's *previous*
+    // (already-complete) messages too, since they share an author_employee_id.
+    if (m.role !== "assistant" || m.status !== "streaming" || !m.author_employee_id) return undefined;
+    const s = statuses[m.author_employee_id];
+    return s ? toLiveActivity(s) : undefined;
+  };
+  const pendingActivities: PendingActivity[] = [];
+  for (const [key, s] of Object.entries(statuses)) {
+    if (key && streamingEmployees.has(key)) continue; // already shown on its message row
+    pendingActivities.push({
+      key: key || "__conversation__",
+      name: key ? employeesById[key]?.name ?? "Someone" : undefined,
+      avatar: key ? employeesById[key]?.avatar ?? null : null,
+      activity: toLiveActivity(s),
+    });
+  }
+  return { activityFor, pendingActivities };
+}
 
 interface Props {
   conversation: Conversation;
@@ -86,10 +127,15 @@ function ChannelChatPane({
   onFocusHandled,
 }: Props) {
   const isGroup = !!conversation.is_group;
-  const { messages, replyCounts, reactions, toggleReaction, members, send, sending, activeTools } = useChannel(
+  const { messages, replyCounts, reactions, toggleReaction, members, send, sending } = useChannel(
     conversation.id,
     companyId,
     onActivity,
+  );
+  const statuses = useConversationStatuses(conversation.id);
+  const { activityFor, pendingActivities } = useMemo(
+    () => deriveActivityRows(messages, statuses, employeesById),
+    [messages, statuses, employeesById],
   );
 
   const [showDebug, setShowDebug] = useState(false);
@@ -169,7 +215,8 @@ function ChannelChatPane({
           onOpenThread={setOpenThreadId}
           onReply={setReplyingTo}
           focusMessageId={mainFocusId}
-          activeToolFor={(m) => (m.author_employee_id ? activeTools[m.author_employee_id] : undefined)}
+          activityFor={activityFor}
+          pendingActivities={pendingActivities}
         />
 
         <Composer
@@ -226,13 +273,18 @@ function DmChatPane({
   focusTarget,
   onFocusHandled,
 }: Props) {
-  const { messages, replyCounts, reactions, toggleReaction, send, cancel, sending, activeTool } = useConversation(
+  const { messages, replyCounts, reactions, toggleReaction, send, cancel, sending } = useConversation(
     conversation.id,
     companyId,
     employee,
     onActivity,
   );
   const { memberOf: employeeChannelIds } = useChannelMembership(employee?.id ?? "");
+  const statuses = useConversationStatuses(conversation.id);
+  const { activityFor, pendingActivities } = useMemo(
+    () => deriveActivityRows(messages, statuses, employeesById),
+    [messages, statuses, employeesById],
+  );
 
   const mentionTargets = useMemo(
     () =>
@@ -304,7 +356,8 @@ function DmChatPane({
           onOpenThread={setOpenThreadId}
           onReply={setReplyingTo}
           focusMessageId={mainFocusId}
-          activeToolFor={(m) => (activeTool?.messageId === m.id ? activeTool.name : undefined)}
+          activityFor={activityFor}
+          pendingActivities={pendingActivities}
         />
 
         <Composer

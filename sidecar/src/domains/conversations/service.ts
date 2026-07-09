@@ -11,6 +11,7 @@ import { preferredProvider, RELEVANCE_MODEL } from "../../providers/availability
 import { resolveManagerName, employeeDisplayName, listChannelMembers, listResponsibilities, getAgentProfile } from "../employees/service";
 import { getUserProfile } from "../settings/service";
 import { registerTurn, unregisterTurn } from "../../runtime/turnRegistry";
+import { createTurnStatus, emitStatus, emitStatusDone, friendlyToolName, statusSnippet } from "../../runtime/agentStatus";
 
 const VALID_EFFORTS: ReadonlySet<string> = new Set<Effort>(["low", "medium", "high", "xhigh", "max"]);
 /** Clamp a stored (possibly stale or hand-corrupted) effort value to a valid Effort
@@ -444,7 +445,7 @@ export async function sendMessage(
   const { notices, block: noticesBlock } = formatReactionNoticesForPrompt(rawNotices);
   const promptWithNotices = noticesBlock ? `${noticesBlock}\n\n${input.text}` : input.text;
 
-  const debugPayload = JSON.stringify({
+  const debugObj = {
     model,
     effort,
     companySystemPrompt: company.system_prompt,
@@ -459,7 +460,8 @@ export async function sendMessage(
     reactionNotices: notices,
     resumeSessionId: resume,
     sentAt: new Date().toISOString(),
-  });
+  };
+  const debugPayload = JSON.stringify(debugObj);
 
   // 4. insert streaming assistant placeholder
   const assistantMessageId = randomUUID();
@@ -489,6 +491,12 @@ export async function sendMessage(
   // reload() ran. Sent as its own "meta" channel (distinct from "text") so the
   // client can patch it in immediately, well before the first text chunk arrives.
   sink.delta("meta", { messageId: assistantMessageId, debugPayload });
+  const status = createTurnStatus(ctx, {
+    conversationId: input.conversationId,
+    employeeId: employee.id,
+    messageId: assistantMessageId,
+  });
+  status.emit({ phase: "thinking", message: "Thinking" });
 
   // 5. run the provider, streaming text deltas; a thrown error here is caught
   // and persisted as a normal error message rather than failing the command.
@@ -501,12 +509,25 @@ export async function sendMessage(
   try {
     const provider = providerOverride ?? getProvider(providerName);
 
+    let lastTextStatusAt = 0;
     const onChunk = (chunk: TurnChunk) => {
       if (chunk.kind === "text") {
         full += chunk.text;
         sink.delta("text", { messageId: assistantMessageId, text: chunk.text });
+        // Throttle status updates — one per streamed token would flood the bus;
+        // the client ticks the "N ago" line itself between updates.
+        const now = Date.now();
+        if (now - lastTextStatusAt > 400) {
+          lastTextStatusAt = now;
+          status.emit({ phase: "writing", message: "Receiving agent output", snippet: statusSnippet(full) });
+        }
       } else {
         sink.delta("tool", { messageId: assistantMessageId, name: chunk.name, phase: chunk.phase });
+        status.emit({
+          phase: chunk.phase === "start" ? "tool" : "writing",
+          message: chunk.phase === "start" ? "Working" : "Receiving agent output",
+          toolName: chunk.phase === "start" ? friendlyToolName(chunk.name) : null,
+        });
       }
     };
 
@@ -539,6 +560,9 @@ export async function sendMessage(
         .set({
           content: finalContent,
           status: result.success ? "complete" : "error",
+          // Re-persist the debug payload now enriched with the turn's activity
+          // timeline, so the debug view can replay what the agent did step by step.
+          debug_payload: JSON.stringify({ ...debugObj, activityLog: status.log }),
           // Previously left null on failure — the DM error bubble showed zero
           // diagnostic content even though the provider had a specific reason
           // (report §4.10).
@@ -598,6 +622,7 @@ export async function sendMessage(
     }
   }
 
+  status.done();
   return { userMessageId, assistantMessageId, sessionId, success, errorMessage, reaction };
 }
 
@@ -812,6 +837,11 @@ export async function runChannelResponders(
   const relevanceProvider = options.relevanceProviderOverride ?? getProvider(relevanceProviderName);
   const relevanceModel = RELEVANCE_MODEL[relevanceProviderName];
 
+  // With no @mentions every member goes through the relevance gate first — surface
+  // that as a conversation-level "deciding who responds" status (cleared below).
+  if (!hasMentions) {
+    emitStatus(ctx, { conversationId, employeeId: null, phase: "relevance", message: "Checking who should respond" });
+  }
   const relevanceResults = await Promise.all(
     members.map(async (member) => {
       if (hasMentions) {
@@ -837,6 +867,8 @@ export async function runChannelResponders(
     decision: r.respond ? ("respond" as const) : ("skip" as const),
     reason: r.reason,
   }));
+
+  if (!hasMentions) emitStatusDone(ctx, conversationId, null);
 
   const responders = relevanceResults.filter((r) => r.respond).map((r) => r.member);
 
@@ -868,15 +900,29 @@ export async function runChannelResponders(
       const { notices, block: noticesBlock } = formatReactionNoticesForPrompt(rawNotices);
       const promptWithNotices = noticesBlock ? `${noticesBlock}\n\n${triggerText}` : triggerText;
 
+      const status = createTurnStatus(ctx, { conversationId, employeeId: member.id });
+      status.emit({ phase: "thinking", message: "Thinking" });
+
       try {
         const provider = options.responderProviderOverride ?? getProvider(providerName);
         let fullText = "";
+        let lastTextStatusAt = 0;
         const onChunk = (chunk: TurnChunk) => {
           if (chunk.kind === "text") {
             fullText += chunk.text;
             sink.delta("channelText", { employeeId: member.id, text: chunk.text });
+            const now = Date.now();
+            if (now - lastTextStatusAt > 400) {
+              lastTextStatusAt = now;
+              status.emit({ phase: "writing", message: "Receiving agent output", snippet: statusSnippet(fullText) });
+            }
           } else {
             sink.delta("channelTool", { employeeId: member.id, name: chunk.name, phase: chunk.phase });
+            status.emit({
+              phase: chunk.phase === "start" ? "tool" : "writing",
+              message: chunk.phase === "start" ? "Working" : "Receiving agent output",
+              toolName: chunk.phase === "start" ? friendlyToolName(chunk.name) : null,
+            });
           }
         };
 
@@ -927,6 +973,7 @@ export async function runChannelResponders(
             resumeSessionId,
             sentAt: new Date().toISOString(),
             channel: { relevanceChecks: relevanceMeta, replyToMessageId: control.replyToMessageId, threadRootId, reactionsApplied: control.reactions },
+            activityLog: status.log,
           });
 
           await insertChannelAssistantMessage(ctx, {
@@ -963,6 +1010,8 @@ export async function runChannelResponders(
         const message = err instanceof Error ? err.message : String(err);
         await insertErrorMessage(ctx, { id: randomUUID(), conversationId, errorMessage: message, authorEmployeeId: member.id }).catch(() => {});
         return { employeeId: member.id, respond: true, posted: false, error: message };
+      } finally {
+        status.done();
       }
     }),
   );

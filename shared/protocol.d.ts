@@ -77,6 +77,40 @@ export interface EventEnvelope<TType extends string = string, TPayload = unknown
   createdAt: string;
 }
 
+/**
+ * Ephemeral "what is this agent doing right now" status for an in-flight turn.
+ * Broadcast to every window (unlike a Delta, which only reaches the initiating
+ * client) and NOT persisted (unlike an Event) — it's live UI state, authored by
+ * the runtime as the turn progresses through its steps (thinking, calling a
+ * tool, relevance-gating, awaiting approval, writing). Keyed to a row by
+ * (conversationId, employeeId): the streaming assistant message an employee is
+ * producing. Cleared by a message with `done: true`.
+ */
+export interface AgentStatus {
+  conversationId: string;
+  /** The employee doing the work; null for a conversation-level status. */
+  employeeId: string | null;
+  /** The server-side assistant message id, when one exists yet. */
+  messageId: string | null;
+  /** Machine phase: thinking | tool | relevance | writing | approval | cascade. */
+  phase: string;
+  /** Human status line, e.g. "Thinking", "Receiving agent output". */
+  message: string;
+  /** Friendly tool name when phase === "tool" (takes over the status line). */
+  toolName: string | null;
+  /** A short preview of the latest assistant output, if any. */
+  snippet: string | null;
+  /** ISO timestamp of the last activity — drives the ticking "N ago" line. */
+  lastEventAt: string;
+  /** True → this turn finished; clear the status. */
+  done: boolean;
+}
+
+export interface StatusEnvelope {
+  kind: "status";
+  status: AgentStatus;
+}
+
 /** Emitted once when the runtime has booted, migrated, and is ready. */
 export interface ReadyEnvelope {
   kind: "ready";
@@ -87,6 +121,7 @@ export type RuntimeOutbound =
   | ResultEnvelope
   | DeltaEnvelope
   | EventEnvelope
+  | StatusEnvelope
   | ReadyEnvelope;
 
 /* ------------------------------------------------------------------ */

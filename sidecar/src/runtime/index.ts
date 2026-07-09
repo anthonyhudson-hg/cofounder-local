@@ -37,6 +37,8 @@ async function main(): Promise<void> {
 
   // Broadcast every committed domain event to the client.
   ctx.bus.subscribe((event) => write(event));
+  // Broadcast ephemeral live-activity statuses to every window (not persisted).
+  ctx.bus.subscribeStatus((status) => write({ kind: "status", status }));
 
   await ensureBootstrap(ctx);
 

@@ -1,10 +1,22 @@
 import { Hash, UsersThree } from "@phosphor-icons/react";
 import { useEffect, useMemo, useRef } from "react";
+import type { LiveActivity } from "../lib/liveActivity";
 import { MentionTarget } from "../lib/mentions";
 import { focusMessageRow } from "../lib/scrollToMessage";
 import { Conversation, Message } from "../types";
 import { Avatar } from "./Avatar";
-import { MessageRow } from "./MessageRow";
+import { AgentWorkingRow, MessageRow } from "./MessageRow";
+
+/** A live agent status that has no message row of its own yet — rendered as a
+ *  synthetic "working" row (a channel responder before it posts, the relevance
+ *  gate, or a turn another window initiated). */
+export interface PendingActivity {
+  key: string;
+  /** Absent for a conversation-level status (e.g. the relevance gate). */
+  name?: string;
+  avatar?: string | null;
+  activity: LiveActivity;
+}
 
 export interface EmployeeInfo {
   name: string;
@@ -26,11 +38,14 @@ interface Props {
   onReply: (message: Message) => void;
   /** A message to scroll to + briefly highlight (jumped-to from global search). */
   focusMessageId?: string;
-  /** Tool name a streaming message is currently calling, if any — a DM has at
-   *  most one in-flight message (keyed by id); a channel can have several
-   *  responders mid-turn at once (keyed by employeeId), so the lookup itself
-   *  is left to the caller rather than MessageList assuming DM's shape. */
-  activeToolFor?: (message: Message) => string | undefined;
+  /** The live activity for a streaming assistant message, if its author is
+   *  working right now. A DM has at most one in-flight message; a channel can
+   *  have several responders at once (keyed by employeeId), so the lookup is
+   *  left to the caller rather than MessageList assuming DM's shape. */
+  activityFor?: (message: Message) => LiveActivity | undefined;
+  /** Working agents that don't have a message row yet — rendered as synthetic
+   *  rows below the conversation (channel responders pre-post, relevance gate). */
+  pendingActivities?: PendingActivity[];
 }
 
 // Shared sentinel so messages with no reactions all pass the same referentially-stable
@@ -55,7 +70,8 @@ export function MessageList({
   onOpenThread,
   onReply,
   focusMessageId,
-  activeToolFor,
+  activityFor,
+  pendingActivities,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
@@ -70,7 +86,7 @@ export function MessageList({
     // every single token (report §5.2).
     if (el && !wasNearBottomRef.current) return;
     endRef.current?.scrollIntoView({ block: "end" });
-  }, [messages]);
+  }, [messages, pendingActivities]);
 
   // Defined AFTER the auto-scroll effect so, on the commit where we jump to a search
   // result, this runs last and wins. The ref guard flashes each target only once (the
@@ -91,7 +107,7 @@ export function MessageList({
     wasNearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < AUTO_SCROLL_THRESHOLD_PX;
   };
 
-  if (messages.length === 0) {
+  if (messages.length === 0 && !pendingActivities?.length) {
     return (
       <div className="message-list message-list-empty">
         <div className="empty-state">
@@ -155,10 +171,13 @@ export function MessageList({
             onReply={onReply}
             replyAuthorName={replyAuthorName}
             replySnippet={replySnippet}
-            activeToolName={activeToolFor?.(m)}
+            activity={activityFor?.(m)}
           />
         );
       })}
+      {pendingActivities?.map((p) => (
+        <AgentWorkingRow key={p.key} name={p.name} avatar={p.avatar} activity={p.activity} />
+      ))}
       <div ref={endRef} />
     </div>
   );
