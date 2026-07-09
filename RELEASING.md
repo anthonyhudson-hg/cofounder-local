@@ -32,9 +32,21 @@ comfortably handles.
 
 2. **Build, signed**:
    ```powershell
-   $env:TAURI_SIGNING_PRIVATE_KEY = "$env:USERPROFILE\.tauri\cofounder-updater.key"
+   # NOTE: TAURI_SIGNING_PRIVATE_KEY takes the key *content*, not a path — pass a
+   # path and the bundler can't load the key and stalls on an interactive password
+   # prompt a non-interactive shell can never answer.
+   $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content "$env:USERPROFILE\.tauri\cofounder-updater.key" -Raw
    $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
    npm run tauri build
+   ```
+
+   If the build ever stalls at `Info Decrypting updater signing key, expect a
+   prompt for password`, the installer `.exe` itself is already built — only the
+   `.sig` is missing. Generate it manually **from Git Bash** (PowerShell silently
+   drops the empty `-p ""` argument, so it must be bash):
+   ```bash
+   printf '\n' | npx tauri signer sign -f "$USERPROFILE/.tauri/cofounder-updater.key" -p "" \
+     src-tauri/target/release/bundle/nsis/Cofounder_<version>_x64-setup.exe
    ```
    This runs the full `build:release` pipeline (fetch/verify the portable
    Node binary, clean-reinstall + build + prune `sidecar/`, build the
