@@ -146,9 +146,15 @@ export function useChannel(conversationId: string, companyId: string, onActivity
           companyId,
           (channel, data) => {
             if (channel === "channelText") {
-              const { employeeId, text: chunk } = data as { employeeId: string; text: string };
+              const { employeeId, text: chunk, reset } = data as { employeeId: string; text: string; reset?: boolean };
               const ephemeralId = `${EPHEMERAL_PREFIX}${employeeId}`;
               const existing = messagesRef.current.find((m) => m.id === ephemeralId);
+              if (reset) {
+                // Stale-session retry discarding its partial text — clear the
+                // ephemeral bubble so the retry doesn't append onto it.
+                if (existing) applyPatch(ephemeralId, { content: "" });
+                return;
+              }
               if (existing) {
                 applyPatch(ephemeralId, { content: existing.content + chunk });
               } else {

@@ -1,6 +1,7 @@
-import { Hash } from "@phosphor-icons/react";
+import { Hash, UsersThree } from "@phosphor-icons/react";
 import { useEffect, useMemo, useRef } from "react";
 import { MentionTarget } from "../lib/mentions";
+import { focusMessageRow } from "../lib/scrollToMessage";
 import { Conversation, Message } from "../types";
 import { Avatar } from "./Avatar";
 import { MessageRow } from "./MessageRow";
@@ -23,6 +24,8 @@ interface Props {
   replyCounts: Record<string, number>;
   onOpenThread: (rootMessageId: string) => void;
   onReply: (message: Message) => void;
+  /** A message to scroll to + briefly highlight (jumped-to from global search). */
+  focusMessageId?: string;
   /** Tool name a streaming message is currently calling, if any — a DM has at
    *  most one in-flight message (keyed by id); a channel can have several
    *  responders mid-turn at once (keyed by employeeId), so the lookup itself
@@ -51,11 +54,13 @@ export function MessageList({
   replyCounts,
   onOpenThread,
   onReply,
+  focusMessageId,
   activeToolFor,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const wasNearBottomRef = useRef(true);
+  const focusedRef = useRef<string | null>(null);
   const messagesById = useMemo(() => new Map(messages.map((m) => [m.id, m])), [messages]);
 
   useEffect(() => {
@@ -66,6 +71,19 @@ export function MessageList({
     if (el && !wasNearBottomRef.current) return;
     endRef.current?.scrollIntoView({ block: "end" });
   }, [messages]);
+
+  // Defined AFTER the auto-scroll effect so, on the commit where we jump to a search
+  // result, this runs last and wins. The ref guard flashes each target only once (the
+  // effect re-runs as `messages` load in), and clears when the target changes so the
+  // same message can be jumped to again later.
+  useEffect(() => {
+    if (!focusMessageId) {
+      focusedRef.current = null;
+      return;
+    }
+    if (focusedRef.current === focusMessageId) return;
+    if (focusMessageRow(containerRef.current, focusMessageId)) focusedRef.current = focusMessageId;
+  }, [focusMessageId, messages]);
 
   const handleScroll = () => {
     const el = containerRef.current;
@@ -84,6 +102,14 @@ export function MessageList({
               </div>
               <h2>Welcome to #{conversation.name}</h2>
               <p>This is the very beginning of the #{conversation.name} channel.</p>
+            </>
+          ) : conversation.is_group ? (
+            <>
+              <div className="empty-state-icon">
+                <UsersThree weight="fill" size={26} />
+              </div>
+              <h2>{conversation.name}</h2>
+              <p>This is the very beginning of the {conversation.name} group.</p>
             </>
           ) : (
             <>

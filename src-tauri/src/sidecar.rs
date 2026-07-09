@@ -94,8 +94,8 @@ fn resolve_runtime_script(app: &AppHandle) -> Result<PathBuf, String> {
     ))
 }
 
-/// The SQLite file the runtime owns — the same file tauri-plugin-sql opens, so
-/// the (transitional) client reader and the runtime writer share one database.
+/// The SQLite file the runtime owns. The runtime is the sole process that opens
+/// this database; the Rust host only computes and passes its path.
 fn resolve_db_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
@@ -147,6 +147,16 @@ fn spawn_node_process(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // Windows: don't flash a console window when spawning the Node runtime. The
+    // portable `node.exe` we bundle is a console subsystem binary, so without
+    // CREATE_NO_WINDOW the OS allocates and shows a black cmd-style window for
+    // the whole lifetime of the app — visible to the user on every launch even
+    // though the runtime is a pure background process it never interacts with.
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
     for (key, value) in extra_env {
         cmd.env(key, value);
     }

@@ -5,6 +5,7 @@ import { useResizableWidth } from "../hooks/useResizableWidth";
 import { useEscapeToClose } from "../hooks/useEscapeToClose";
 import { ReplyTarget } from "../hooks/useConversation";
 import { MentionTarget } from "../lib/mentions";
+import { focusMessageRow } from "../lib/scrollToMessage";
 import { Conversation, Effort } from "../types";
 import { Composer } from "./Composer";
 import { EmployeeInfo } from "./MessageList";
@@ -22,12 +23,16 @@ interface Props {
   onSend: (text: string, model: string, effort: Effort, replyTo: ReplyTarget) => void;
   sending: boolean;
   onCancel?: () => void;
-  showModelEffort: boolean;
-  model: string;
-  effort: Effort;
-  onModelChange: (m: string) => void;
-  onEffortChange: (e: Effort) => void;
+  // Model/effort controls are DM-only; channel threads omit these (the runtime
+  // resolves each member's model server-side).
+  showModelEffort?: boolean;
+  model?: string;
+  effort?: Effort;
+  onModelChange?: (m: string) => void;
+  onEffortChange?: (e: Effort) => void;
   onClose: () => void;
+  /** A thread reply to scroll to + briefly highlight (jumped-to from global search). */
+  focusMessageId?: string;
 }
 
 const EMPTY_REACTIONS: string[] = [];
@@ -44,16 +49,19 @@ export function ThreadPanel({
   onSend,
   sending,
   onCancel,
-  showModelEffort,
-  model,
-  effort,
-  onModelChange,
-  onEffortChange,
+  showModelEffort = false,
+  model = "",
+  effort = "medium",
+  onModelChange = () => {},
+  onEffortChange = () => {},
   onClose,
+  focusMessageId,
 }: Props) {
   const { messages, reload } = useThread(conversation.id, threadRootId);
   const { width, onMouseDown } = useResizableWidth(360, 280, 560, "left");
   const endRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const focusedRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!sending) reload();
@@ -68,6 +76,16 @@ export function ThreadPanel({
     endRef.current?.scrollIntoView({ block: "end" });
   }, [messages]);
 
+  // Runs after the bottom-scroll effect so a jumped-to reply wins; flashes once per target.
+  useEffect(() => {
+    if (!focusMessageId) {
+      focusedRef.current = null;
+      return;
+    }
+    if (focusedRef.current === focusMessageId) return;
+    if (focusMessageRow(bodyRef.current, focusMessageId)) focusedRef.current = focusMessageId;
+  }, [focusMessageId, messages]);
+
   useEscapeToClose(true, onClose);
 
   return (
@@ -79,7 +97,7 @@ export function ThreadPanel({
           <X />
         </button>
       </div>
-      <div className="thread-panel-body">
+      <div className="thread-panel-body" ref={bodyRef}>
         {messages.map((m) => {
           const authorInfo = m.author_employee_id ? employeesById[m.author_employee_id] : null;
           const displayName = m.role === "user" ? "You" : authorInfo?.name ?? conversation.name;

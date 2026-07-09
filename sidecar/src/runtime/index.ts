@@ -17,13 +17,10 @@ function extractId(value: unknown): string {
 }
 
 /**
- * The agent runtime entry point (refactor #2). Owns SQLite, boots migrations,
- * and serves the newline-delimited JSON protocol over stdin/stdout. The Rust
- * host pipes client Commands/Queries in and broadcasts Events/Results out.
- *
- * NOTE: during the strangler transition this runs ALONGSIDE the legacy
- * `index.ts` handlers; domains move over one at a time until this is the only
- * entry point.
+ * The agent runtime entry point. Owns SQLite, boots migrations, and serves the
+ * newline-delimited JSON protocol over stdin/stdout. The Rust host pipes client
+ * Commands/Queries in and broadcasts Events/Results out. This is the sole
+ * backend process — the earlier client-orchestrated sidecar was fully retired.
  */
 
 function write(out: RuntimeOutbound): void {

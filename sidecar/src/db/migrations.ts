@@ -275,4 +275,14 @@ export const MIGRATIONS: Migration[] = [
     sql: `DROP INDEX IF EXISTS idx_reactions_message;
           DROP INDEX IF EXISTS idx_capability_grants_employee;`,
   },
+  {
+    name: "0008_drop_event_outbox",
+    // The `event_outbox` table (created in 0002) was scaffolding for a
+    // committed-event side-effect processor that was never built — nothing has
+    // ever inserted into or read from it. Dropping the dead table rather than
+    // carrying it (and its FK to `events`) forward indefinitely. If a durable
+    // outbox is wanted later, reintroduce it in a fresh migration alongside the
+    // processor that actually consumes it.
+    sql: `DROP TABLE IF EXISTS event_outbox;`,
+  },
 ];

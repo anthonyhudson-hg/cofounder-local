@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
+import type { Transaction } from "kysely";
+import type { Database } from "../../db/schema";
 import type { RuntimeContext } from "../../runtime/context";
 import { mutate } from "../../runtime/unitOfWork";
+import { DEFAULT_CHAT_MODEL, detectProviders, preferredProvider } from "../../providers/availability";
+import { modelProvider, type ModelProviderName } from "../../runtime/models";
+import { nextPositionAfter } from "../../runtime/position";
 
 export async function listEmployees(ctx: RuntimeContext, companyId: string) {
   return ctx.db.selectFrom("employees").where("company_id", "=", companyId).selectAll().execute();
@@ -79,29 +84,138 @@ export interface CreateEmployeeInput {
   jobTitle?: string;
   department?: string;
   avatar?: string | null;
+  // Full-persona fields — populated by the candidate flow (both Hire and onboarding).
+  // All optional so a bare create (name/title/department only) still works unchanged.
+  mission?: string;
+  preamble?: string;
+  additionalDetails?: string;
+  // When omitted, insertFullEmployee falls back to the configured provider's
+  // default model (see below) rather than the column's hardcoded Claude default.
+  defaultModel?: string;
+  defaultEffort?: string;
+  responsibilities?: string[];
+  // agent_profiles fields (the "Personality & autonomy" panel).
+  personality?: string;
+  communicationStyle?: string;
+  expertise?: string[];
 }
 
-export async function createEmployee(ctx: RuntimeContext, input: CreateEmployeeInput): Promise<{ conversationId: string; employeeId: string }> {
+/**
+ * The single place an employee row (its 1:1 DM conversation + the employee record
+ * + its responsibilities) is written. Runs inside a caller-provided transaction and
+ * does NOT emit — the caller owns the event. Shared by `createEmployee` (Hire) and
+ * `applyOnboarding` so both paths populate an identical, fully-fleshed employee.
+ */
+export async function insertFullEmployee(
+  trx: Transaction<Database>,
+  input: CreateEmployeeInput,
+): Promise<{ conversationId: string; employeeId: string }> {
   const name = input.name.trim();
   if (!name) throw new Error("employee name required");
   const conversationId = randomUUID();
   const employeeId = randomUUID();
-  await mutate(ctx, async (trx, emit) => {
-    await trx.insertInto("conversations").values({ id: conversationId, company_id: input.companyId, kind: "dm", name }).execute();
+
+  await trx.insertInto("conversations").values({ id: conversationId, company_id: input.companyId, kind: "dm", name }).execute();
+  await trx
+    .insertInto("employees")
+    .values({
+      id: employeeId,
+      company_id: input.companyId,
+      conversation_id: conversationId,
+      job_title: input.jobTitle ?? "",
+      department: input.department ?? "",
+      avatar: input.avatar ?? null,
+      // Let the column defaults stand when a field is absent, rather than forcing "".
+      ...(input.mission !== undefined ? { mission: input.mission } : {}),
+      ...(input.preamble !== undefined ? { preamble: input.preamble } : {}),
+      ...(input.additionalDetails !== undefined ? { additional_details: input.additionalDetails } : {}),
+      // Default the model to whatever provider is actually configured rather than
+      // the column's hardcoded Claude default, so employees created on a
+      // Codex-only install are usable out of the box.
+      default_model: DEFAULT_CHAT_MODEL[preferredProvider()],
+    })
+    .execute();
+
+  const responsibilities = (input.responsibilities ?? []).map((r) => r.trim()).filter(Boolean);
+  if (responsibilities.length) {
     await trx
-      .insertInto("employees")
+      .insertInto("employee_responsibilities")
+      .values(responsibilities.map((text, position) => ({ id: randomUUID(), employee_id: employeeId, text, position })))
+      .execute();
+  }
+
+  // Seed the agent profile (personality / communication style / expertise) when the
+  // candidate supplied it. autonomy_level is set explicitly to the same value a
+  // never-configured employee behaves as (see DEFAULT_AGENT_PROFILE), so creating the
+  // row here introduces no approval-friction change vs. the column's own 'suggest'.
+  const expertise = (input.expertise ?? []).map((e) => e.trim()).filter(Boolean);
+  const personality = (input.personality ?? "").trim();
+  const communicationStyle = (input.communicationStyle ?? "").trim();
+  if (personality || communicationStyle || expertise.length) {
+    await trx
+      .insertInto("agent_profiles")
       .values({
-        id: employeeId,
-        company_id: input.companyId,
-        conversation_id: conversationId,
-        job_title: input.jobTitle ?? "",
-        department: input.department ?? "",
-        avatar: input.avatar ?? null,
+        employee_id: employeeId,
+        personality,
+        communication_style: communicationStyle,
+        expertise: JSON.stringify(expertise),
+        autonomy_level: "act-with-approval",
+        updated_at: new Date().toISOString(),
       })
       .execute();
-    await emit({ companyId: input.companyId, type: "employee.created", subjectId: employeeId, actor: { kind: "user" }, payload: { conversationId } });
-  });
+  }
+
   return { conversationId, employeeId };
+}
+
+export async function createEmployee(ctx: RuntimeContext, input: CreateEmployeeInput): Promise<{ conversationId: string; employeeId: string }> {
+  return mutate(ctx, async (trx, emit) => {
+    const ids = await insertFullEmployee(trx, input);
+    await emit({ companyId: input.companyId, type: "employee.created", subjectId: ids.employeeId, actor: { kind: "user" }, payload: { conversationId: ids.conversationId } });
+    return ids;
+  });
+}
+
+/**
+ * Repoint any employee whose model belongs to a provider that is NOT currently
+ * configured onto the preferred available provider's default model. This exists
+ * for one specific ordering: the very first company + Chief of Staff are seeded
+ * at runtime boot, which can happen before the user has set up ANY provider (the
+ * launch gate then makes them configure one). Without this, a user who sets up
+ * only Codex at the gate would be left with a Chief of Staff still pointing at
+ * Claude — usable everywhere except the one conversation that shipped by default.
+ * Idempotent and cheap (a no-op once every employee already matches an available
+ * provider), so it's safe to call on every launch after the gate clears.
+ */
+export async function reconcileEmployeeModels(ctx: RuntimeContext): Promise<{ updated: number }> {
+  const detected = detectProviders();
+  const available = new Set<ModelProviderName>(
+    (Object.keys(detected) as ModelProviderName[]).filter((p) => detected[p]),
+  );
+  // Nothing configured — don't touch anything (the gate is blocking the app anyway).
+  if (available.size === 0) return { updated: 0 };
+
+  const target = DEFAULT_CHAT_MODEL[preferredProvider()];
+  const employees = await ctx.db.selectFrom("employees").select(["id", "company_id", "default_model"]).execute();
+  const stale = employees.filter((e) => !available.has(modelProvider(e.default_model)));
+  if (stale.length === 0) return { updated: 0 };
+
+  // Group by company so each mutation emits a company-scoped event, consistent
+  // with every other write going through mutate().
+  const byCompany = new Map<string, string[]>();
+  for (const e of stale) {
+    if (!e.company_id) continue;
+    const ids = byCompany.get(e.company_id) ?? [];
+    ids.push(e.id);
+    byCompany.set(e.company_id, ids);
+  }
+  for (const [companyId, ids] of byCompany) {
+    await mutate(ctx, async (trx, emit) => {
+      await trx.updateTable("employees").set({ default_model: target }).where("id", "in", ids).execute();
+      await emit({ companyId, type: "employee.models.reconciled", subjectId: companyId, actor: { kind: "system" }, payload: { count: ids.length, model: target } });
+    });
+  }
+  return { updated: stale.length };
 }
 
 // ---- responsibilities ----
@@ -112,7 +226,7 @@ export async function listResponsibilities(ctx: RuntimeContext, employeeId: stri
 export async function addResponsibility(ctx: RuntimeContext, companyId: string, employeeId: string, text: string): Promise<void> {
   await mutate(ctx, async (trx, emit) => {
     const max = await trx.selectFrom("employee_responsibilities").where("employee_id", "=", employeeId).select(trx.fn.max("position").as("m")).executeTakeFirst();
-    const position = (Number(max?.m ?? -1) || -1) + 1;
+    const position = nextPositionAfter(max?.m);
     await trx.insertInto("employee_responsibilities").values({ id: randomUUID(), employee_id: employeeId, text, position }).execute();
     await emit({ companyId, type: "employee.responsibility.added", subjectId: employeeId, actor: { kind: "user" }, payload: {} });
   });

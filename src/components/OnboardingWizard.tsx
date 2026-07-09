@@ -2,10 +2,13 @@ import { useState } from "react";
 import { useAsyncAction } from "../hooks/useAsyncAction";
 import { Company } from "../types";
 import { command } from "../lib/runtimeClient";
+import { urlToResizedDataUrl } from "../lib/avatar";
+import { FullCandidate } from "../lib/candidates";
+import { CandidatePicker } from "./CandidatePicker";
 
 interface Props {
   company: Company;
-  onDone: () => void;
+  onDone: (newDmConversationIds: string[]) => void;
 }
 
 interface SuggestedRole {
@@ -21,6 +24,21 @@ interface Suggestion {
   channels: string[];
 }
 
+/** A suggested role with the candidate the founder picked for it — the wire shape of onboarding.apply's `roles`. */
+interface ChosenRole {
+  jobTitle: string;
+  department: string;
+  name: string;
+  avatar: string | null;
+  mission: string;
+  preamble: string;
+  additionalDetails: string;
+  responsibilities: string[];
+  personality: string;
+  communicationStyle: string;
+  expertise: string[];
+}
+
 const STAGES = ["Idea", "Pre-seed", "Seed", "Series A", "Growth"];
 const PRIORITIES = [
   "Build the product",
@@ -33,7 +51,7 @@ const PRIORITIES = [
 ];
 
 export function OnboardingWizard({ company, onDone }: Props) {
-  const [step, setStep] = useState<"about" | "focus" | "review">("about");
+  const [step, setStep] = useState<"about" | "focus" | "review" | "hire">("about");
   const [name, setName] = useState(company.name === "My Company" ? "" : company.name);
   const [description, setDescription] = useState("");
   const [stage, setStage] = useState("Seed");
@@ -46,6 +64,11 @@ export function OnboardingWizard({ company, onDone }: Props) {
   const [systemPrompt, setSystemPrompt] = useState("");
   const [selectedRoles, setSelectedRoles] = useState<Set<number>>(new Set());
   const [selectedChannels, setSelectedChannels] = useState<Set<number>>(new Set());
+
+  // Hiring sub-flow: pick 1-of-3 candidates for each selected role, one role at a time.
+  const [hireIndex, setHireIndex] = useState(0);
+  const [chosen, setChosen] = useState<ChosenRole[]>([]);
+  const rolesToHire = suggestion ? suggestion.roles.filter((_, i) => selectedRoles.has(i)) : [];
 
   const togglePriority = (p: string) =>
     setPriorities((prev) => (prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]));
@@ -67,20 +90,61 @@ export function OnboardingWizard({ company, onDone }: Props) {
     runGenerate();
   };
 
-  const [runFinish, { busy: applying, error: finishError }] = useAsyncAction(async () => {
-    if (!suggestion) return;
-    await command(
+  const [runFinish, { busy: applying, error: finishError }] = useAsyncAction(async (roles: ChosenRole[]) => {
+    const { conversationIds } = await command<{ ok: true; conversationIds: string[] }>(
       "onboarding.apply",
       {
         companyName: name.trim() || "My Company",
-        profile: suggestion.profile,
+        profile: suggestion?.profile ?? company.profile,
         systemPrompt,
-        roles: suggestion.roles.filter((_, i) => selectedRoles.has(i)),
-        channels: suggestion.channels.filter((_, i) => selectedChannels.has(i)),
+        roles,
+        channels: suggestion ? suggestion.channels.filter((_, i) => selectedChannels.has(i)) : [],
       },
       company.id,
     );
-    onDone();
+    onDone(conversationIds);
+  });
+
+  // Leaving the review step: if any roles are selected, walk the founder through
+  // picking a candidate for each; otherwise finalize immediately (no hires).
+  const startHiring = () => {
+    if (rolesToHire.length === 0) {
+      runFinish([]);
+      return;
+    }
+    setChosen([]);
+    setHireIndex(0);
+    setStep("hire");
+  };
+
+  const [runPickCandidate, { error: pickError }] = useAsyncAction(async (candidate: FullCandidate) => {
+    const role = rolesToHire[hireIndex];
+    let avatar: string | null;
+    try {
+      avatar = await urlToResizedDataUrl(candidate.photoUrl);
+    } catch {
+      avatar = null; // a missing avatar shouldn't block the hire
+    }
+    const next = [...chosen];
+    next[hireIndex] = {
+      jobTitle: role.jobTitle,
+      department: role.department,
+      name: candidate.name,
+      avatar,
+      mission: candidate.mission,
+      preamble: candidate.preamble,
+      additionalDetails: candidate.additionalDetails,
+      responsibilities: candidate.responsibilities,
+      personality: candidate.personality,
+      communicationStyle: candidate.communicationStyle,
+      expertise: candidate.expertise,
+    };
+    setChosen(next);
+    if (hireIndex + 1 < rolesToHire.length) {
+      setHireIndex(hireIndex + 1);
+    } else {
+      await runFinish(next);
+    }
   });
 
   const [runSkip, { busy: skipping, error: skipError }] = useAsyncAction(async () => {
@@ -92,7 +156,7 @@ export function OnboardingWizard({ company, onDone }: Props) {
       { companyName: trimmedName, profile: company.profile, systemPrompt: company.system_prompt, roles: [], channels: [] },
       company.id,
     );
-    onDone();
+    onDone([]);
   });
 
   return (
@@ -103,7 +167,7 @@ export function OnboardingWizard({ company, onDone }: Props) {
           <div className="onboarding-steps">
             <span className={step === "about" ? "on" : ""}>1 · About</span>
             <span className={step === "focus" ? "on" : ""}>2 · Focus</span>
-            <span className={step === "review" ? "on" : ""}>3 · Team</span>
+            <span className={step === "review" || step === "hire" ? "on" : ""}>3 · Team</span>
           </div>
         </div>
 
@@ -239,11 +303,40 @@ export function OnboardingWizard({ company, onDone }: Props) {
 
                 <div className="onboarding-actions">
                   <button className="settings-link-btn" onClick={() => setStep("focus")}>Back</button>
-                  <button className="settings-save-btn" disabled={applying} onClick={runFinish}>{applying ? "Setting up…" : "Finish setup"}</button>
+                  <button className="settings-save-btn" disabled={applying} onClick={startHiring}>
+                    {applying ? "Setting up…" : rolesToHire.length > 0 ? `Meet your candidates (${rolesToHire.length}) →` : "Finish setup"}
+                  </button>
                 </div>
                 {finishError && <p className="form-error">{finishError}</p>}
               </>
             ) : null}
+          </div>
+        )}
+
+        {step === "hire" && rolesToHire.length > 0 && (
+          <div className="onboarding-body">
+            <div className="onboarding-hire-progress">
+              Hiring {Math.min(hireIndex + 1, rolesToHire.length)} of {rolesToHire.length}
+              {applying && " · finalizing…"}
+            </div>
+            <CandidatePicker
+              key={hireIndex}
+              companyId={company.id}
+              jobTitle={rolesToHire[hireIndex].jobTitle}
+              department={rolesToHire[hireIndex].department}
+              onPick={runPickCandidate}
+              picking={applying}
+            />
+            <div className="onboarding-actions">
+              <button
+                className="settings-link-btn"
+                disabled={applying}
+                onClick={() => (hireIndex > 0 ? setHireIndex(hireIndex - 1) : setStep("review"))}
+              >
+                Back
+              </button>
+            </div>
+            {(pickError || finishError) && <p className="form-error">{pickError || finishError}</p>}
           </div>
         )}
       </div>

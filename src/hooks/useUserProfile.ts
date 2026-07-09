@@ -6,11 +6,20 @@ export function useUserProfile() {
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
-      const r = await query<{ userFullName: string }>("userProfile.get", {}, null);
-      setUserFullNameState(r.userFullName);
-      setLoaded(true);
+      try {
+        const r = await query<{ userFullName: string }>("userProfile.get", {}, null);
+        if (!cancelled) setUserFullNameState(r.userFullName);
+      } catch {
+        // keep the default (empty) on failure
+      } finally {
+        if (!cancelled) setLoaded(true);
+      }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const setUserFullName = useCallback(async (value: string) => {

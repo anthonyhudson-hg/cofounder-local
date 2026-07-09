@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 import { AppSettingsModal } from "./components/AppSettingsModal";
 import { ChatPane } from "./components/ChatPane";
@@ -11,8 +11,9 @@ import { IconRail, RailView } from "./components/IconRail";
 import { EmployeeInfo } from "./components/MessageList";
 import { OnboardingModal } from "./components/OnboardingModal";
 import { OnboardingWizard } from "./components/OnboardingWizard";
+import { ProviderSetupGate } from "./components/ProviderSetupGate";
 import { OrgChartView } from "./components/OrgChartView";
-import { SearchModal } from "./components/SearchModal";
+import { GlobalSearch } from "./components/GlobalSearch";
 import { Sidebar } from "./components/Sidebar";
 import { TitleBar } from "./components/TitleBar";
 import { useActiveCompany } from "./hooks/useActiveCompany";
@@ -24,13 +25,18 @@ import { useDesktopNotifications } from "./hooks/useDesktopNotifications";
 import { useEmployee } from "./hooks/useEmployee";
 import { useEmployees } from "./hooks/useEmployees";
 import { useNotificationPreference } from "./hooks/useNotificationPreference";
+import { useProviderHealth } from "./hooks/useProviderHealth";
 import { useStartupErrors } from "./hooks/useStartupErrors";
 import { useUpdateChecker } from "./hooks/useUpdateChecker";
 import { useUserProfile } from "./hooks/useUserProfile";
 import { setActiveCompanyId } from "./lib/activeCompany";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { command } from "./lib/runtimeClient";
+import { ensureNotificationWindow, onNotificationOpen } from "./lib/notificationPopup";
+import { MessageTarget } from "./lib/search";
 import { applyTheme, themeForColor } from "./lib/themes";
-import { Employee } from "./types";
+import { ProviderAvailabilityContext } from "./lib/providerAvailability";
+import { Employee, Provider } from "./types";
 
 export default function App() {
   const {
@@ -49,7 +55,11 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [appSettingsOpen, setAppSettingsOpen] = useState(false);
-  const [searchOpen, setSearchOpen] = useState(false);
+  // A message the user jumped to from global search — consumed by ChatPane to
+  // scroll/highlight it (and open its thread). Null once handled.
+  const [searchFocus, setSearchFocus] = useState<MessageTarget | null>(null);
+  // GlobalSearch assigns its focus() here so the sidebar search button can focus it.
+  const searchFocusRef = useRef<(() => void) | null>(null);
   const [hireOpen, setHireOpen] = useState(false);
   const [groupOpen, setGroupOpen] = useState(false);
   // DMs created this session (via onboarding) that have no messages yet. Without this
@@ -67,14 +77,54 @@ export default function App() {
     setEnabled: setNotificationsEnabled,
     loaded: notificationPrefLoaded,
   } = useNotificationPreference();
-  useDesktopNotifications(notificationsEnabled, activeId);
   const startupError = useStartupErrors();
+  const {
+    health: providerHealth,
+    loading: providerHealthLoading,
+    error: providerHealthError,
+    recheck: recheckProviders,
+  } = useProviderHealth();
   const update = useUpdateChecker();
+
+  // Providers actually connected on this machine, for graying out unavailable
+  // models in every picker. null = unknown (health unresolved or errored) →
+  // pickers don't gray anything out.
+  const availableProviders = useMemo<Provider[] | null>(() => {
+    if (!providerHealth || providerHealth.providers.length === 0) return null;
+    return providerHealth.providers.filter((p) => p.available).map((p) => p.provider);
+  }, [providerHealth]);
 
   // Apply the active company's theme across the whole UI; re-applies on switch.
   useEffect(() => {
     applyTheme(themeForColor(company?.color));
   }, [company?.color]);
+
+  // Once a provider is confirmed available, repoint any employee whose model
+  // belongs to a now-unavailable provider (chiefly the Chief of Staff, which is
+  // seeded at first boot before the user has configured anything) onto an
+  // available one. Idempotent and a no-op in the common case; reloads only if it
+  // actually changed something.
+  const [providersReconciled, setProvidersReconciled] = useState(false);
+  useEffect(() => {
+    if (!providerHealth?.anyAvailable || providersReconciled) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await command<{ updated: number }>("providers.reconcile", {}, null);
+        if (!cancelled && res.updated > 0) {
+          await Promise.all([reloadConversations(), reloadEmployees(), reloadEmployee()]);
+        }
+      } catch {
+        // Best-effort — send-time errors remain the backstop.
+      } finally {
+        if (!cancelled) setProvidersReconciled(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providerHealth?.anyAvailable]);
 
   // Land on the Chief of Staff DM (the primary interface) so its started
   // conversation is on screen; fall back to the first channel.
@@ -116,12 +166,112 @@ export default function App() {
     setActiveId(res.conversationId);
   };
 
+  // Navigate to a conversation from global search, keeping message-less DMs visible.
+  const revealConversation = (conversationId: string) => {
+    setView("chats");
+    setActiveId(conversationId);
+    setFreshDmIds((prev) => (prev.has(conversationId) ? prev : new Set(prev).add(conversationId)));
+  };
+  const handleSelectConversation = (conversationId: string) => {
+    revealConversation(conversationId);
+    setSearchFocus(null);
+  };
+  const handleSelectMessage = (target: MessageTarget) => {
+    revealConversation(target.conversationId);
+    setSearchFocus(target);
+  };
+
+  // Registered here (after handleSelectMessage exists) so a clicked notification can
+  // jump to its message. Hook order stays stable across renders — its position among
+  // plain consts is irrelevant to the Rules of Hooks.
+  useDesktopNotifications(notificationsEnabled, activeId, handleSelectMessage);
+
+  // The custom notification popup lives in its own window; when the user clicks its
+  // "Open" action, focus the main window and jump to the message.
+  useEffect(() => {
+    void ensureNotificationWindow().catch(() => {});
+    let unlisten: (() => void) | undefined;
+    onNotificationOpen((target) => {
+      const win = getCurrentWindow();
+      win.unminimize().catch(() => {});
+      win.setFocus().catch(() => {});
+      handleSelectMessage(target);
+    }).then((u) => {
+      unlisten = u;
+    });
+    return () => unlisten?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   if (!companyLoaded || !loaded || !profileLoaded) {
     return (
       <div className="app-root">
         <TitleBar />
         {startupError && <div className="startup-error-banner">{startupError}</div>}
         <div className="app-loading">Loading...</div>
+      </div>
+    );
+  }
+
+  // The health query itself failed (runtime unresponsive / timed out). Do NOT
+  // fail open into onboarding that would then die on the first message — surface
+  // a retryable error instead. (Distinct from the startup-error banner, which
+  // only covers the runtime failing to SPAWN.)
+  if (providerHealthError) {
+    return (
+      <div className="app-root">
+        <TitleBar />
+        {startupError && <div className="startup-error-banner">{startupError}</div>}
+        <div className="modal-scrim">
+          <div className="modal provider-gate">
+            <div className="modal-header">
+              <h3>Couldn't check model providers</h3>
+            </div>
+            <div className="debug-body">
+              <p className="settings-hint">
+                The background runtime didn't respond, so Cofounder can't confirm a model provider is
+                connected. It may still be starting up, or it may have stopped. Retry in a moment.
+              </p>
+              <div className="provider-gate-detail" title={providerHealthError}>
+                {providerHealthError}
+              </div>
+              <div className="settings-save-row">
+                <button className="settings-save-btn" disabled={providerHealthLoading} onClick={recheckProviders}>
+                  {providerHealthLoading ? "Checking…" : "Retry"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Health check still in flight. Its own screen (not the bare "Loading…") so
+  // the — occasionally multi-second — provider ping reads as deliberate.
+  if (!providerHealth) {
+    return (
+      <div className="app-root">
+        <TitleBar />
+        {startupError && <div className="startup-error-banner">{startupError}</div>}
+        <div className="app-loading">Checking model providers…</div>
+      </div>
+    );
+  }
+
+  // Fail fast: no authenticated AI provider means not a single employee turn can
+  // run, so gate the whole app (before onboarding) on setting one up rather than
+  // letting the user hit an opaque failure on their first message.
+  if (!providerHealth.anyAvailable) {
+    return (
+      <div className="app-root">
+        <TitleBar />
+        {startupError && <div className="startup-error-banner">{startupError}</div>}
+        <ProviderSetupGate
+          providers={providerHealth.providers}
+          loading={providerHealthLoading}
+          onRecheck={recheckProviders}
+        />
       </div>
     );
   }
@@ -180,13 +330,6 @@ export default function App() {
     (c) => c.id === activeId || conversationsWithMessages.has(c.id) || freshDmIds.has(c.id),
   );
 
-  const searchEntries = employees
-    .map((emp) => {
-      const conversation = allConversations.find((c) => c.id === emp.conversation_id);
-      return conversation ? { employee: emp, conversation } : null;
-    })
-    .filter((x): x is { employee: Employee; conversation: (typeof dms)[number] } => x !== null);
-
   const employeesById: Record<string, EmployeeInfo> = {};
   for (const emp of employees) {
     const conv = allConversations.find((c) => c.id === emp.conversation_id);
@@ -204,8 +347,20 @@ export default function App() {
   };
 
   return (
+    <ProviderAvailabilityContext.Provider value={availableProviders}>
     <div className="app-root">
-      <TitleBar>{company.name}</TitleBar>
+      <TitleBar
+        center={
+          <GlobalSearch
+            companyId={companyId}
+            onSelectConversation={handleSelectConversation}
+            onSelectMessage={handleSelectMessage}
+            focusRef={searchFocusRef}
+          />
+        }
+      >
+        {company.name}
+      </TitleBar>
       {startupError && <div className="startup-error-banner">{startupError}</div>}
       {update.available && (
         <div className="update-banner">
@@ -278,7 +433,7 @@ export default function App() {
               setSidebarOpen(false);
             }}
             onOpenAppSettings={() => setAppSettingsOpen(true)}
-            onOpenSearch={() => setSearchOpen(true)}
+            onOpenSearch={() => searchFocusRef.current?.()}
             onOpenGroup={() => setGroupOpen(true)}
             onOpenHire={() => setHireOpen(true)}
             onCreateChannel={handleCreateChannel}
@@ -287,7 +442,14 @@ export default function App() {
             dmMeta={dmMeta}
           />
           {active && (
+            // key by conversation id so switching conversations REMOUNTS ChatPane
+            // with fresh per-conversation hook state. Without it the same
+            // useConversation/useChannel instance is reused across switches, and an
+            // in-flight streaming turn's finally-reload() (plus sending/reactions/
+            // activeTools) commits the previous conversation's data into the newly
+            // selected one (report T1.3).
             <ChatPane
+              key={active.id}
               conversation={active}
               employee={employee}
               employees={employees}
@@ -297,6 +459,8 @@ export default function App() {
               onNavigate={setActiveId}
               onOpenSidebar={() => setSidebarOpen(true)}
               onActivity={reloadActivity}
+              focusTarget={searchFocus && active.id === searchFocus.conversationId ? searchFocus : null}
+              onFocusHandled={() => setSearchFocus(null)}
             />
           )}
         </>
@@ -330,13 +494,6 @@ export default function App() {
           update={update}
         />
       )}
-      {searchOpen && (
-        <SearchModal
-          entries={searchEntries}
-          onSelect={(conversationId) => setActiveId(conversationId)}
-          onClose={() => setSearchOpen(false)}
-        />
-      )}
       {hireOpen && (
         <HireModal
           companyId={companyId}
@@ -365,5 +522,6 @@ export default function App() {
       )}
       </div>
     </div>
+    </ProviderAvailabilityContext.Provider>
   );
 }

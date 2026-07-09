@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import type { Actor, EventEnvelope } from "@shared/protocol";
 import { onRuntimeEvent, query, startRuntimeBus } from "../lib/runtimeClient";
 import { useActivityStore } from "../store/activityStore";
@@ -22,6 +22,31 @@ function actorLabel(actor: Actor): string {
   return "System";
 }
 
+function formatTime(ts: string): string {
+  const d = new Date(ts);
+  return isNaN(d.getTime()) ? ts : d.toLocaleString();
+}
+
+function ActivityRow({ event }: { event: EventEnvelope }) {
+  const [expanded, setExpanded] = useState(false);
+  const payload = JSON.stringify(event.payload);
+  return (
+    <li className="activity-item">
+      <span className="activity-seq">#{event.seq}</span>
+      <span className="activity-type">{event.type}</span>
+      <span className="activity-actor">{actorLabel(event.actor)}</span>
+      <span className="activity-time">{formatTime(event.createdAt)}</span>
+      <code
+        className={`activity-payload${expanded ? " expanded" : ""}`}
+        title={expanded ? "Click to collapse" : "Click to expand"}
+        onClick={() => setExpanded((v) => !v)}
+      >
+        {payload}
+      </code>
+    </li>
+  );
+}
+
 interface Props {
   companyId: string | null;
 }
@@ -37,11 +62,15 @@ export function ActivityView({ companyId }: Props) {
     clear();
     if (!companyId) return;
     const token = begin();
-    query<AuditEventItem[]>("audit.list", { limit: 100 }, companyId).then((rows) => {
-      if (!isCurrent(token)) return;
-      const asEvents: EventEnvelope[] = rows.map((r) => ({ kind: "event", companyId, ...r }));
-      seedHistory(asEvents);
-    });
+    query<AuditEventItem[]>("audit.list", { limit: 100 }, companyId)
+      .then((rows) => {
+        if (!isCurrent(token)) return;
+        const asEvents: EventEnvelope[] = rows.map((r) => ({ kind: "event", companyId, ...r }));
+        seedHistory(asEvents);
+      })
+      .catch((err) => {
+        console.error("Failed to load activity history:", err);
+      });
   }, [companyId, clear, seedHistory, begin, isCurrent]);
 
   useEffect(() => {
@@ -72,13 +101,7 @@ export function ActivityView({ companyId }: Props) {
       ) : (
         <ul className="activity-list">
           {events.map((e) => (
-            <li key={e.id} className="activity-item">
-              <span className="activity-seq">#{e.seq}</span>
-              <span className="activity-type">{e.type}</span>
-              <span className="activity-actor">{actorLabel(e.actor)}</span>
-              <span className="activity-time">{e.createdAt}</span>
-              <code className="activity-payload">{JSON.stringify(e.payload)}</code>
-            </li>
+            <ActivityRow key={e.id} event={e} />
           ))}
         </ul>
       )}

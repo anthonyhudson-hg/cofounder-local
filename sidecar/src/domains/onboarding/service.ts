@@ -2,6 +2,10 @@ import { randomUUID } from "node:crypto";
 import type { RuntimeContext } from "../../runtime/context";
 import { mutate } from "../../runtime/unitOfWork";
 import { getProvider, drainTurn } from "../../providers";
+import { preferredProvider, UTILITY_MODEL } from "../../providers/availability";
+import { nextPositionAfter } from "../../runtime/position";
+import { extractJson } from "../../runtime/parseJson";
+import { insertFullEmployee } from "../employees/service";
 
 export interface OnboardingAnswers {
   companyName: string;
@@ -25,14 +29,6 @@ export interface OnboardingSuggestion {
   systemPrompt: string;
   roles: SuggestedRole[];
   channels: string[];
-}
-
-function extractJson(text: string): string {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-  if (fenced) return fenced[1];
-  const brace = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  return brace >= 0 && end > brace ? text.slice(brace, end + 1) : text;
 }
 
 /** Deterministic fallback used when the model call fails or returns junk. */
@@ -76,8 +72,8 @@ function fallbackSuggestion(a: OnboardingAnswers): OnboardingSuggestion {
 /**
  * Generates a company profile, an auto-composed company system prompt, and a
  * REALISTIC minimal set of initial hires + channels from the founder's answers.
- * Uses the Claude provider; falls back to a deterministic heuristic if the model
- * is unavailable or returns unparseable output.
+ * Uses whichever provider is configured (see preferredProvider); falls back to a
+ * deterministic heuristic if the model is unavailable or returns unparseable output.
  */
 export async function generateOnboarding(
   _ctx: RuntimeContext,
@@ -97,9 +93,12 @@ export async function generateOnboarding(
 
   try {
     let raw = "";
+    const provider = preferredProvider();
     await drainTurn(
-      getProvider("claude").runTurn({ model: "claude-sonnet-5", effort: "medium", systemPrompt: system, prompt }),
-      (t) => (raw += t),
+      getProvider(provider).runTurn({ model: UTILITY_MODEL[provider], effort: "medium", systemPrompt: system, prompt }),
+      (chunk) => {
+        if (chunk.kind === "text") raw += chunk.text;
+      },
     );
     const parsed = JSON.parse(extractJson(raw)) as Partial<OnboardingSuggestion>;
     const roles = Array.isArray(parsed.roles)
@@ -118,17 +117,45 @@ export async function generateOnboarding(
   }
 }
 
+/**
+ * A role the founder actually chose to hire during onboarding — i.e. a picked
+ * candidate. Unlike `SuggestedRole` (the suggestion), this carries the full persona
+ * so onboarding produces employees identical to the Hire flow.
+ */
+export interface HiredCandidateRole {
+  jobTitle: string;
+  department: string;
+  name: string;
+  avatar: string | null;
+  mission: string;
+  preamble: string;
+  additionalDetails: string;
+  responsibilities: string[];
+  personality: string;
+  communicationStyle: string;
+  expertise: string[];
+}
+
 export interface ApplyOnboardingInput {
   companyId: string;
   companyName: string;
   profile: string;
   systemPrompt: string;
-  roles: SuggestedRole[];
+  roles: HiredCandidateRole[];
   channels: string[];
 }
 
-/** Persists the finalized onboarding: company profile/prompt/name, hires, channels; marks onboarded. */
-export async function applyOnboarding(ctx: RuntimeContext, input: ApplyOnboardingInput): Promise<{ ok: true }> {
+/**
+ * Persists the finalized onboarding: company profile/prompt/name, hires, channels; marks onboarded.
+ * Returns the DM conversation ids of the newly-created employees so the client can surface them
+ * immediately — freshly-created employees have no messages, and the sidebar's DM list hides
+ * message-less DMs, so without this the whole hired cohort would be invisible after onboarding.
+ */
+export async function applyOnboarding(
+  ctx: RuntimeContext,
+  input: ApplyOnboardingInput,
+): Promise<{ ok: true; conversationIds: string[] }> {
+  const newConversationIds: string[] = [];
   await mutate(ctx, async (trx, emit) => {
     const updated = await trx
       .updateTable("companies")
@@ -146,19 +173,29 @@ export async function applyOnboarding(ctx: RuntimeContext, input: ApplyOnboardin
       .where("company_id", "=", input.companyId)
       .select(trx.fn.max("position").as("m"))
       .executeTakeFirst();
-    let nextPosition = (Number(maxPos?.m ?? -1) || -1) + 1;
+    let nextPosition = nextPositionAfter(maxPos?.m);
     const assignedDepartmentPositions = new Set<string>();
 
     const newEmployeeIds: string[] = [];
     for (const role of input.roles) {
-      const conversationId = randomUUID();
-      const employeeId = randomUUID();
-      await trx.insertInto("conversations").values({ id: conversationId, company_id: input.companyId, kind: "dm", name: role.jobTitle }).execute();
-      await trx
-        .insertInto("employees")
-        .values({ id: employeeId, company_id: input.companyId, conversation_id: conversationId, job_title: role.jobTitle, department: role.department, mission: role.mission })
-        .execute();
+      // Same insert path as the Hire flow — a fully-populated employee (name, avatar,
+      // persona, responsibilities), not a bare stub.
+      const { conversationId, employeeId } = await insertFullEmployee(trx, {
+        companyId: input.companyId,
+        name: role.name || role.jobTitle,
+        jobTitle: role.jobTitle,
+        department: role.department,
+        avatar: role.avatar ?? null,
+        mission: role.mission,
+        preamble: role.preamble,
+        additionalDetails: role.additionalDetails,
+        responsibilities: role.responsibilities,
+        personality: role.personality,
+        communicationStyle: role.communicationStyle,
+        expertise: role.expertise,
+      });
       newEmployeeIds.push(employeeId);
+      newConversationIds.push(conversationId);
 
       // ensure the department exists
       if (!assignedDepartmentPositions.has(role.department)) {
@@ -194,5 +231,5 @@ export async function applyOnboarding(ctx: RuntimeContext, input: ApplyOnboardin
 
     await emit({ companyId: input.companyId, type: "company.onboarded", subjectId: input.companyId, actor: { kind: "user" }, payload: { roles: input.roles.length, channels: input.channels.length } });
   });
-  return { ok: true };
+  return { ok: true, conversationIds: newConversationIds };
 }

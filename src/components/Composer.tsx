@@ -70,13 +70,15 @@ interface MentionQuery {
 
 interface Props {
   placeholder: string;
-  disabled?: boolean;
   onSend: (markdown: string) => void;
+  /** When set, shows the model/effort selector — DM panes only. Channel panes
+   *  omit it (and the model/effort props below) since a channel turn resolves
+   *  each member's own model server-side. */
   showModelEffort?: boolean;
-  model: string;
-  effort: Effort;
-  onModelChange: (m: string) => void;
-  onEffortChange: (e: Effort) => void;
+  model?: string;
+  effort?: Effort;
+  onModelChange?: (m: string) => void;
+  onEffortChange?: (e: Effort) => void;
   mentionTargets?: MentionTarget[];
   replyPreview?: ReplyPreview | null;
   onCancelReply?: () => void;
@@ -90,13 +92,12 @@ interface Props {
 
 export function Composer({
   placeholder,
-  disabled,
   onSend,
   showModelEffort,
-  model,
-  effort,
-  onModelChange,
-  onEffortChange,
+  model = "",
+  effort = "medium",
+  onModelChange = () => {},
+  onEffortChange = () => {},
   mentionTargets,
   replyPreview,
   onCancelReply,
@@ -137,11 +138,6 @@ export function Composer({
   useEffect(() => {
     setHighlightedIndex(0);
   }, [mentionQuery?.from, mentionQuery?.to, mentionQuery?.term]);
-
-  const disabledRef = useRef(disabled);
-  useLayoutEffect(() => {
-    disabledRef.current = disabled;
-  });
 
   const editor = useEditor(
     {
@@ -208,10 +204,6 @@ export function Composer({
     }
   });
 
-  useEffect(() => {
-    editor?.setEditable(!disabled);
-  }, [editor, disabled]);
-
   const isEmpty = useEditorState({
     editor,
     selector: (ctx) => ctx.editor?.isEmpty ?? true,
@@ -226,7 +218,7 @@ export function Composer({
   const submitRef = useRef(() => {});
   useLayoutEffect(() => {
     submitRef.current = () => {
-      if (!editor || editor.isEmpty || disabledRef.current) return;
+      if (!editor || editor.isEmpty) return;
       const markdown: string = editor.storage.markdown.getMarkdown().trim();
       if (!markdown) return;
       onSend(markdown);
@@ -268,7 +260,7 @@ export function Composer({
           </button>
         </div>
       )}
-      <div className={`composer-card ${disabled ? "composer-card-disabled" : ""}`}>
+      <div className="composer-card">
         <div className="composer-format-toolbar">
           {TOOLBAR_ACTIONS.map((action) => (
             <button
@@ -278,7 +270,7 @@ export function Composer({
               title={action.label}
               aria-label={action.label}
               aria-pressed={!!(editor && activeMarks.has(action.isActive))}
-              disabled={!editor || disabled}
+              disabled={!editor}
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => editor && action.run(editor)}
             >
@@ -315,7 +307,6 @@ export function Composer({
               effort={effort}
               onModelChange={onModelChange}
               onEffortChange={onEffortChange}
-              disabled={disabled}
             />
           ) : (
             <span />
@@ -328,7 +319,7 @@ export function Composer({
             <button
               className="send-button"
               title="Send"
-              disabled={disabled || !editor || isEmpty}
+              disabled={!editor || isEmpty}
               onClick={() => submitRef.current()}
             >
               <PaperPlaneTilt weight="fill" />

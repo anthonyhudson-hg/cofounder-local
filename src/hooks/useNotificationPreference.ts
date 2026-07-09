@@ -6,11 +6,20 @@ export function useNotificationPreference() {
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
-      const r = await query<{ enabled: boolean }>("notifications.pref", {}, null);
-      setEnabledState(r.enabled);
-      setLoaded(true);
+      try {
+        const r = await query<{ enabled: boolean }>("notifications.pref", {}, null);
+        if (!cancelled) setEnabledState(r.enabled);
+      } catch {
+        // keep the default (enabled) on failure
+      } finally {
+        if (!cancelled) setLoaded(true);
+      }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const setEnabled = useCallback(async (value: boolean) => {

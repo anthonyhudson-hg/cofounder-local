@@ -1,10 +1,11 @@
 import { Check, X } from "@phosphor-icons/react";
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { useAsyncAction } from "../hooks/useAsyncAction";
 import { useCreateEmployee } from "../hooks/useCreateEmployee";
 import { useDepartments } from "../hooks/useDepartments";
 import { useEscapeToClose } from "../hooks/useEscapeToClose";
-import { Candidate, fetchCandidates } from "../lib/randomUser";
+import { CandidatePicker } from "./CandidatePicker";
+import { FullCandidate } from "../lib/candidates";
 import { DEFAULT_DEPARTMENT_SUGGESTIONS, Employee } from "../types";
 
 interface Props {
@@ -21,10 +22,8 @@ export function HireModal({ companyId, employees, onCreated, onClose }: Props) {
   const [mode, setMode] = useState<Mode>("search");
   const [searchText, setSearchText] = useState("");
   const [department, setDepartment] = useState<string | null>(null);
+  const [browseTitle, setBrowseTitle] = useState("");
 
-  const [candidates, setCandidates] = useState<Candidate[] | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [loadAttempt, setLoadAttempt] = useState(0);
   const [addingDepartment, setAddingDepartment] = useState(false);
   const [newDepartmentName, setNewDepartmentName] = useState("");
 
@@ -53,49 +52,31 @@ export function HireModal({ companyId, employees, onCreated, onClose }: Props) {
   // blur-triggered create against a direct click on Next (report §5.9) — the user must
   // explicitly commit the new department (Enter / confirm button / blur) first, which
   // flips `addingDepartment` false and unlocks Next with `department` already set.
-  const canProceed = mode === "search" ? searchText.trim().length > 0 : !addingDepartment && !!department;
+  const canProceed =
+    mode === "search"
+      ? searchText.trim().length > 0
+      : !addingDepartment && !!department && browseTitle.trim().length > 0;
 
-  useEffect(() => {
-    if (step !== "candidates" || candidates) return;
-    let cancelled = false;
-    setLoadError(null);
-    fetchCandidates(54)
-      .then((results) => {
-        if (!cancelled) setCandidates(results);
-      })
-      .catch((err) => {
-        if (!cancelled) setLoadError(err instanceof Error ? err.message : String(err));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [step, candidates, loadAttempt]);
+  // The job title + department the candidate generation and the hire are keyed on.
+  const jobTitle = mode === "search" ? searchText.trim() : browseTitle.trim();
+  const hireDepartment = mode === "browse" ? department ?? "" : "";
 
-  const retryLoadCandidates = useCallback(() => {
-    setLoadError(null);
-    setLoadAttempt((n) => n + 1);
-  }, []);
-
-  const [runPick, { busy: picking, error: pickError }, clearPickError] = useAsyncAction(
-    async (candidate: Candidate) => {
-      const { conversationId } = await create({
-        name: candidate.name,
-        photoUrl: candidate.photoUrl,
-        jobTitle: mode === "search" ? searchText.trim() : "",
-        department: mode === "browse" ? department ?? "" : "",
-      });
-      onCreated(conversationId);
-    },
-  );
-  const [pickingName, setPickingName] = useState<string | null>(null);
-
-  const handlePick = async (candidate: Candidate) => {
-    if (pickingName) return;
-    setPickingName(candidate.name);
-    clearPickError();
-    await runPick(candidate);
-    setPickingName(null);
-  };
+  const [runPick, { busy: picking, error: pickError }] = useAsyncAction(async (candidate: FullCandidate) => {
+    const { conversationId } = await create({
+      name: candidate.name,
+      photoUrl: candidate.photoUrl,
+      jobTitle,
+      department: hireDepartment,
+      mission: candidate.mission,
+      preamble: candidate.preamble,
+      additionalDetails: candidate.additionalDetails,
+      responsibilities: candidate.responsibilities,
+      personality: candidate.personality,
+      communicationStyle: candidate.communicationStyle,
+      expertise: candidate.expertise,
+    });
+    onCreated(conversationId);
+  });
 
   useEscapeToClose(true, onClose);
 
@@ -191,6 +172,15 @@ export function HireModal({ companyId, employees, onCreated, onClose }: Props) {
               </div>
             )}
 
+            {mode === "browse" && !!department && !addingDepartment && (
+              <input
+                className="hire-search-input"
+                placeholder={`What's the job title? e.g. a specific ${department} role`}
+                value={browseTitle}
+                onChange={(e) => setBrowseTitle(e.target.value)}
+              />
+            )}
+
             <div className="settings-save-row">
               <button
                 className="settings-save-btn"
@@ -205,32 +195,13 @@ export function HireModal({ companyId, employees, onCreated, onClose }: Props) {
 
         {step === "candidates" && (
           <div className="hire-step">
-            <p className="hire-step-prompt">Pick a candidate</p>
-            {loadError && (
-              <div className="hire-error">
-                Couldn't load candidates: {loadError}{" "}
-                <button className="settings-link-btn" onClick={retryLoadCandidates}>
-                  Retry
-                </button>
-              </div>
-            )}
-            {!candidates && !loadError && <div className="hire-loading">Finding candidates…</div>}
-            {candidates && (
-              <div className="hire-candidate-grid">
-                {candidates.map((c) => (
-                  <button
-                    key={c.name}
-                    className="hire-candidate-card"
-                    disabled={!!pickingName || picking}
-                    onClick={() => handlePick(c)}
-                  >
-                    <img className="hire-candidate-photo" src={c.photoUrl} alt={c.name} />
-                    <span className="hire-candidate-name">{c.name}</span>
-                    {pickingName === c.name && <span className="hire-candidate-hiring">Hiring…</span>}
-                  </button>
-                ))}
-              </div>
-            )}
+            <CandidatePicker
+              companyId={companyId}
+              jobTitle={jobTitle}
+              department={hireDepartment}
+              onPick={runPick}
+              picking={picking}
+            />
             {pickError && <p className="form-error">Couldn't hire: {pickError}</p>}
           </div>
         )}

@@ -152,7 +152,14 @@ export function useConversation(
               return;
             }
             if (channel !== "text") return;
-            const { text: chunk } = data as { messageId: string; text: string };
+            const { text: chunk, reset } = data as { messageId: string; text: string; reset?: boolean };
+            if (reset) {
+              // A stale-session retry is discarding the partial text it already
+              // streamed; clear the placeholder so the retry's text doesn't append
+              // onto the abandoned attempt's.
+              applyPatch(assistantMsgId, { content: "" });
+              return;
+            }
             const current = messagesRef.current.find((m) => m.id === assistantMsgId);
             applyPatch(assistantMsgId, { content: (current?.content ?? "") + chunk });
           },

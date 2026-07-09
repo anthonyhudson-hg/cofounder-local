@@ -12,18 +12,15 @@ import {
   CAPABILITY_EFFECT_LABELS,
   CapabilityEffect,
   Conversation,
-  EFFORTS,
   Effort,
   Employee,
-  MODELS,
-  PROVIDERS,
-  PROVIDER_LABELS,
   Responsibility,
   scopeLabel,
 } from "../types";
 import { useAgentProfile } from "../hooks/useAgentProfile";
 import { useCapabilities } from "../hooks/useCapabilities";
 import { useChannelMembership } from "../hooks/useChannelMembership";
+import { ModelEffortSelector } from "./ModelEffortSelector";
 import { useDepartments } from "../hooks/useDepartments";
 import { useEscapeToClose } from "../hooks/useEscapeToClose";
 import { usePhotoUpload } from "../hooks/usePhotoUpload";
@@ -400,37 +397,12 @@ export function EmployeeSettingsPanel({
 
         <div className="settings-section">
           <div className="settings-section-title">Model</div>
-
-          <div className="settings-field-row">
-            <label className="settings-field">
-              <span className="settings-label">Default model</span>
-              <select value={employee.default_model} onChange={(e) => onUpdateField("default_model", e.target.value)}>
-                {PROVIDERS.map((p) => (
-                  <optgroup key={p} label={PROVIDER_LABELS[p]}>
-                    {MODELS.filter((m) => m.provider === p).map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.label}
-                      </option>
-                    ))}
-                  </optgroup>
-                ))}
-              </select>
-            </label>
-
-            <label className="settings-field">
-              <span className="settings-label">Default effort</span>
-              <select
-                value={employee.default_effort}
-                onChange={(e) => onUpdateField("default_effort", e.target.value as Effort)}
-              >
-                {EFFORTS.map((e) => (
-                  <option key={e} value={e}>
-                    {e[0].toUpperCase() + e.slice(1)}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
+          <ModelEffortSelector
+            model={employee.default_model}
+            effort={employee.default_effort as Effort}
+            onModelChange={(m) => onUpdateField("default_model", m)}
+            onEffortChange={(e) => onUpdateField("default_effort", e)}
+          />
         </div>
 
         <div className="settings-section">

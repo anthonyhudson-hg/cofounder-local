@@ -23,6 +23,13 @@ comfortably handles.
 1. **Bump the version** in `src-tauri/tauri.conf.json`'s `version` field and
    root `package.json`'s `version` field (keep them in sync).
 
+   These two are the authoritative version for the release: Tauri takes the
+   installer/updater version straight from `tauri.conf.json`. The versions in
+   `src-tauri/Cargo.toml` and `sidecar/package.json` are intentionally
+   **decoupled** — they are internal crate/package metadata, not surfaced to
+   users or the updater, and there is no automated sync check. Leave them or
+   bump them for tidiness; either way they do not affect the shipped artifact.
+
 2. **Build, signed**:
    ```powershell
    $env:TAURI_SIGNING_PRIVATE_KEY = "$env:USERPROFILE\.tauri\cofounder-updater.key"

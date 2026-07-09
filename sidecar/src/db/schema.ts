@@ -137,15 +137,6 @@ export interface EventsTable {
   created_at: Generated<string>;
 }
 
-export interface EventOutboxTable {
-  event_seq: number;
-  handler: string;
-  status: Generated<"pending" | "done" | "error">;
-  attempts: Generated<number>;
-  last_error: string | null;
-  created_at: Generated<string>;
-}
-
 export interface SecretsTable {
   id: string;
   company_id: string;
@@ -216,7 +207,6 @@ export interface Database {
   agent_sessions: AgentSessionsTable;
   departments: DepartmentsTable;
   events: EventsTable;
-  event_outbox: EventOutboxTable;
   secrets: SecretsTable;
   capability_grants: CapabilityGrantsTable;
   approvals: ApprovalsTable;

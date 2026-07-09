@@ -30,25 +30,13 @@ import {
   listThread,
   listActiveConversationIds,
   createGroup,
-  insertUserMessage,
-  insertAssistantPlaceholder,
-  insertChannelAssistantMessage,
-  insertErrorMessage,
-  finalizeMessage,
-  setMessageError,
-  getConversationSession,
-  setConversationSession,
-  addReaction,
-  recentMessages,
-  openThreadRoots,
-  getAgentSession,
-  upsertAgentSession,
-  insertRelevanceCheck,
-  consumeReactionNotices,
   createChannel,
 } from "./conversations/service";
 import { countTokens } from "./tokenCount";
-import { generateOnboarding, applyOnboarding, type SuggestedRole } from "./onboarding/service";
+import { generateOnboarding, applyOnboarding, type HiredCandidateRole } from "./onboarding/service";
+import { generateCandidates } from "./employees/candidates";
+import { globalSearch } from "./search/service";
+import { checkProviderHealth } from "./health/service";
 import type { Effort } from "../providers";
 import {
   listEmployees,
@@ -66,6 +54,7 @@ import {
   listChannelMembers,
   getAgentProfile,
   updateAgentProfileField,
+  reconcileEmployeeModels,
 } from "./employees/service";
 import {
   getUserProfile,
@@ -193,6 +182,12 @@ register("query:memberships.forEmployee", async (ctx, inbound) =>
 register("query:channel.members", async (ctx, inbound) =>
   listChannelMembers(ctx, p<{ conversationId: string }>(inbound).conversationId),
 );
+register("query:search.global", async (ctx, inbound) => {
+  const { q, limit } = p<{ q: string; limit?: number }>(inbound);
+  return globalSearch(ctx, requireCompany(inbound), q, limit);
+});
+register("query:providers.health", async () => checkProviderHealth());
+register("command:providers.reconcile", async (ctx) => reconcileEmployeeModels(ctx));
 register("query:userProfile.get", async (ctx) => getUserProfile(ctx));
 register("query:notifications.pref", async (ctx) => getNotificationPreference(ctx));
 
@@ -231,11 +226,30 @@ register("command:capability.revoke", async (ctx, inbound) => {
   return { ok: true };
 });
 register("command:employee.create", async (ctx, inbound) => {
-  const b = p<{ name: string; jobTitle?: string; department?: string; avatar?: string | null }>(inbound);
+  const b = p<{
+    name: string;
+    jobTitle?: string;
+    department?: string;
+    avatar?: string | null;
+    mission?: string;
+    preamble?: string;
+    additionalDetails?: string;
+    defaultModel?: string;
+    defaultEffort?: string;
+    responsibilities?: string[];
+    personality?: string;
+    communicationStyle?: string;
+    expertise?: string[];
+  }>(inbound);
   return createEmployee(ctx, { companyId: requireCompany(inbound), ...b });
 });
 register("command:group.create", async (ctx, inbound) => {
   const { name, employeeIds } = p<{ name: string; employeeIds: string[] }>(inbound);
+  // The wire type is unchecked at the dispatch boundary — guard the array shape
+  // and ids before they reach the insert rather than trusting the cast.
+  if (!Array.isArray(employeeIds) || employeeIds.some((id) => typeof id !== "string" || !id)) {
+    throw new Error("group.create: employeeIds must be a non-empty array of ids");
+  }
   return createGroup(ctx, requireCompany(inbound), name, employeeIds);
 });
 register("command:channel.create", async (ctx, inbound) => {
@@ -245,8 +259,11 @@ register("command:channel.create", async (ctx, inbound) => {
 register("command:onboarding.generate", async (ctx, inbound) => {
   return generateOnboarding(ctx, p(inbound));
 });
+register("command:candidates.generate", async (ctx, inbound) => {
+  return generateCandidates(ctx, { companyId: requireCompany(inbound), ...p<{ jobTitle: string; department: string; count?: number }>(inbound) });
+});
 register("command:onboarding.apply", async (ctx, inbound) => {
-  return applyOnboarding(ctx, { companyId: requireCompany(inbound), ...p<{ companyName: string; profile: string; systemPrompt: string; roles: SuggestedRole[]; channels: string[] }>(inbound) });
+  return applyOnboarding(ctx, { companyId: requireCompany(inbound), ...p<{ companyName: string; profile: string; systemPrompt: string; roles: HiredCandidateRole[]; channels: string[] }>(inbound) });
 });
 register("command:responsibility.add", async (ctx, inbound) => {
   const { employeeId, text } = p<{ employeeId: string; text: string }>(inbound);
@@ -284,69 +301,18 @@ register("command:notifications.baseline", async (ctx) => {
 });
 register("command:notifications.drain", async (ctx) => ({ pending: await drainNotifications(ctx) }));
 
-// ---- granular chat ops (client keeps orchestration; DB lives on the runtime) ----
-register("query:conversation.session", async (ctx, inbound) => getConversationSession(ctx, p<{ conversationId: string }>(inbound).conversationId));
-register("query:messages.recent", async (ctx, inbound) => {
-  const { conversationId, limit } = p<{ conversationId: string; limit: number }>(inbound);
-  return recentMessages(ctx, conversationId, limit);
-});
-register("query:messages.openThreads", async (ctx, inbound) => {
-  const { conversationId, limit } = p<{ conversationId: string; limit: number }>(inbound);
-  return openThreadRoots(ctx, conversationId, limit);
-});
-register("query:agentSession.get", async (ctx, inbound) => {
-  const { conversationId, employeeId } = p<{ conversationId: string; employeeId: string }>(inbound);
-  return getAgentSession(ctx, conversationId, employeeId);
-});
-register("command:message.insertUser", async (ctx, inbound) => {
-  await insertUserMessage(ctx, p(inbound));
-  return { ok: true };
-});
-register("command:message.insertAssistantPlaceholder", async (ctx, inbound) => {
-  await insertAssistantPlaceholder(ctx, p(inbound));
-  return { ok: true };
-});
-register("command:message.insertChannelAssistant", async (ctx, inbound) => {
-  await insertChannelAssistantMessage(ctx, p(inbound));
-  return { ok: true };
-});
-register("command:message.insertError", async (ctx, inbound) => {
-  await insertErrorMessage(ctx, p(inbound));
-  return { ok: true };
-});
-register("command:message.finalize", async (ctx, inbound) => {
-  await finalizeMessage(ctx, p(inbound));
-  return { ok: true };
-});
-register("command:message.setError", async (ctx, inbound) => {
-  const { id, message } = p<{ id: string; message: string }>(inbound);
-  await setMessageError(ctx, id, message);
-  return { ok: true };
-});
-register("command:conversation.setSession", async (ctx, inbound) => {
-  const { conversationId, sessionId, provider } = p<{ conversationId: string; sessionId: string; provider: string }>(inbound);
-  await setConversationSession(ctx, conversationId, sessionId, provider);
-  return { ok: true };
-});
-register("command:reaction.add", async (ctx, inbound) => {
-  const { messageId, emoji, reactor } = p<{ messageId: string; emoji: string; reactor: string }>(inbound);
-  await addReaction(ctx, messageId, emoji, reactor);
-  return { ok: true };
-});
-register("command:agentSession.upsert", async (ctx, inbound) => {
-  const { conversationId, employeeId, sessionId, provider } = p<{ conversationId: string; employeeId: string; sessionId: string; provider: string }>(inbound);
-  await upsertAgentSession(ctx, conversationId, employeeId, sessionId, provider);
-  return { ok: true };
-});
-register("command:relevanceCheck.insert", async (ctx, inbound) => {
-  const { messageId, employeeId, decision, reason } = p<{ messageId: string; employeeId: string; decision: "respond" | "skip"; reason: string }>(inbound);
-  await insertRelevanceCheck(ctx, messageId, employeeId, decision, reason);
-  return { ok: true };
-});
-register("command:reactionNotices.consume", async (ctx, inbound) => {
-  const { employeeId, userFullName } = p<{ employeeId: string; userFullName: string }>(inbound);
-  return { notices: await consumeReactionNotices(ctx, employeeId, userFullName) };
-});
+// NOTE: the granular "chat ops" handlers (message.insertUser/insertAssistantPlaceholder/
+// insertChannelAssistant/insertError/finalize/setError, conversation.session/setSession,
+// agentSession.get/upsert, reaction.add, relevanceCheck.insert, reactionNotices.consume,
+// messages.recent/openThreads) were removed in the full server-side turn-loop cutover.
+// They were leftovers from the client-orchestrated design: the client would drive a turn
+// by calling these one at a time. The whole turn loop now lives server-side in
+// sendMessage/sendChannelMessage, so nothing calls them — and exposing them was an active
+// hazard (command:message.insertChannelAssistant let any client insert an assistant
+// message with an arbitrary author_employee_id into any conversation, forging a message
+// from any employee while bypassing the turn loop and its capability gates). The
+// underlying functions that are still used internally by the turn loop remain in
+// conversations/service.ts; only their IPC exposure is gone.
 
 interface SendMessagePayload {
   conversationId: string;

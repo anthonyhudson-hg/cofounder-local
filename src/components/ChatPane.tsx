@@ -21,6 +21,9 @@ interface Props {
   onNavigate: (conversationId: string) => void;
   onOpenSidebar: () => void;
   onActivity: () => void;
+  /** A message jumped to from global search — scrolled to + highlighted, thread auto-opened. */
+  focusTarget?: { messageId: string; threadRootId: string | null } | null;
+  onFocusHandled?: () => void;
 }
 
 export function ChatPane(props: Props) {
@@ -28,6 +31,46 @@ export function ChatPane(props: Props) {
     return <ChannelChatPane {...props} />;
   }
   return <DmChatPane {...props} />;
+}
+
+/**
+ * Drives jump-to-message from global search: opens the thread if the target is a
+ * reply, then hands the message id to whichever list (main pane or thread) owns it.
+ * Must be called AFTER the pane's own conversation-change reset effect so it wins the
+ * openThreadId race on a cross-conversation jump.
+ */
+function useJumpToMessage(
+  conversationId: string,
+  focusTarget: Props["focusTarget"],
+  onFocusHandled: (() => void) | undefined,
+  setOpenThreadId: (id: string | null) => void,
+) {
+  const [focusId, setFocusId] = useState<string | null>(null);
+  const [inThread, setInThread] = useState(false);
+
+  // Clear a stale focus when the conversation changes (runs before the target effect below).
+  useEffect(() => {
+    setFocusId(null);
+    setInThread(false);
+  }, [conversationId]);
+
+  useEffect(() => {
+    if (!focusTarget) return;
+    if (focusTarget.threadRootId) {
+      setOpenThreadId(focusTarget.threadRootId);
+      setInThread(true);
+    } else {
+      setInThread(false);
+    }
+    setFocusId(focusTarget.messageId);
+    onFocusHandled?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusTarget]);
+
+  return {
+    mainFocusId: inThread ? undefined : focusId ?? undefined,
+    threadFocusId: inThread ? focusId ?? undefined : undefined,
+  };
 }
 
 function ChannelChatPane({
@@ -39,6 +82,8 @@ function ChannelChatPane({
   onNavigate,
   onOpenSidebar,
   onActivity,
+  focusTarget,
+  onFocusHandled,
 }: Props) {
   const isGroup = !!conversation.is_group;
   const { messages, replyCounts, reactions, toggleReaction, members, send, sending, activeTools } = useChannel(
@@ -71,6 +116,8 @@ function ChannelChatPane({
     setOpenThreadId(null);
     setReplyingTo(null);
   }, [conversation.id]);
+
+  const { mainFocusId, threadFocusId } = useJumpToMessage(conversation.id, focusTarget, onFocusHandled, setOpenThreadId);
 
   const replyPreview = replyingTo
     ? {
@@ -121,6 +168,7 @@ function ChannelChatPane({
           replyCounts={replyCounts}
           onOpenThread={setOpenThreadId}
           onReply={setReplyingTo}
+          focusMessageId={mainFocusId}
           activeToolFor={(m) => (m.author_employee_id ? activeTools[m.author_employee_id] : undefined)}
         />
 
@@ -130,10 +178,6 @@ function ChannelChatPane({
             send(text, replyingTo ? { messageId: replyingTo.id, threadRootId: replyingTo.thread_root_id } : undefined);
             setReplyingTo(null);
           }}
-          model=""
-          effort="medium"
-          onModelChange={() => {}}
-          onEffortChange={() => {}}
           mentionTargets={mentionTargets}
           replyPreview={replyPreview}
           onCancelReply={() => setReplyingTo(null)}
@@ -152,12 +196,8 @@ function ChannelChatPane({
           onMentionClick={handleMentionClick}
           onSend={(text, _m, _e, replyTo) => send(text, replyTo)}
           sending={sending}
-          showModelEffort={false}
-          model=""
-          effort="medium"
-          onModelChange={() => {}}
-          onEffortChange={() => {}}
           onClose={() => setOpenThreadId(null)}
+          focusMessageId={threadFocusId}
         />
       )}
 
@@ -183,6 +223,8 @@ function DmChatPane({
   onNavigate,
   onOpenSidebar,
   onActivity,
+  focusTarget,
+  onFocusHandled,
 }: Props) {
   const { messages, replyCounts, reactions, toggleReaction, send, cancel, sending, activeTool } = useConversation(
     conversation.id,
@@ -215,6 +257,8 @@ function DmChatPane({
     setOpenThreadId(null);
     setReplyingTo(null);
   }, [employee?.conversation_id, conversation.id]);
+
+  const { mainFocusId, threadFocusId } = useJumpToMessage(conversation.id, focusTarget, onFocusHandled, setOpenThreadId);
 
   const replyPreview = replyingTo
     ? {
@@ -259,6 +303,7 @@ function DmChatPane({
           replyCounts={replyCounts}
           onOpenThread={setOpenThreadId}
           onReply={setReplyingTo}
+          focusMessageId={mainFocusId}
           activeToolFor={(m) => (activeTool?.messageId === m.id ? activeTool.name : undefined)}
         />
 
@@ -305,6 +350,7 @@ function DmChatPane({
           onModelChange={setModel}
           onEffortChange={setEffort}
           onClose={() => setOpenThreadId(null)}
+          focusMessageId={threadFocusId}
         />
       )}
     </div>

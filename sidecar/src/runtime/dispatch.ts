@@ -56,7 +56,7 @@ export async function dispatch(
   return handler(ctx, inbound, sink);
 }
 
-// ---- Phase A handlers (domains register more as they are strangled in) ----
+// ---- Core handlers (each domain registers its own on top of these) ----
 
 register("query:ping", async (ctx) => ({
   ok: true,

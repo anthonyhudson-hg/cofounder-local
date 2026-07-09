@@ -18,12 +18,25 @@ import { storeSecret, getSecret } from "../secrets/vault";
 import { companyWorkspaceRoot } from "../connectors/workspace";
 import { buildMemoryWriteToolDef } from "../providers/claudeMemoryTool";
 import { buildMessageSendToolDef } from "../providers/claudeMessageSendTool";
+import { ZERO_USAGE, type AgentProvider, type TurnResult } from "../providers";
 
 function freshCtx(): RuntimeContext {
   const p = path.join(os.tmpdir(), `cf-test-${randomUUID()}.db`);
   process.env.COFOUNDER_DB_PATH = p;
   process.env.COFOUNDER_KEY_DIR = os.tmpdir();
   return createRuntimeContext();
+}
+
+/** A fake AgentProvider that streams a fixed text then returns a fixed result —
+ *  lets the LLM-driven paths (candidate generation, health ping) be tested without
+ *  a live model call. */
+function scriptedProvider(text: string, result: Partial<TurnResult> = {}): AgentProvider {
+  return {
+    async *runTurn() {
+      if (text) yield { kind: "text", text };
+      return { sessionId: null, success: true, usage: ZERO_USAGE, totalCostUsd: 0, ...result };
+    },
+  };
 }
 
 test("migrator: fresh DB applies all migrations; existing DB baselines", () => {
@@ -809,6 +822,151 @@ test("github connector: a cwd outside the company workspace is rejected (report 
   await ctx.db.destroy();
 });
 
+test("createEmployee (full persona): populates mission/preamble/additional_details + ordered responsibilities + agent profile", async () => {
+  const { createEmployee, listResponsibilities, getAgentProfile } = await import("../domains/employees/service");
+  const ctx = freshCtx();
+  const { id: companyId } = await createCompany(ctx, { name: "Acme" }, { kind: "user" });
+
+  const { employeeId, conversationId } = await createEmployee(ctx, {
+    companyId,
+    name: "Ivana Tinkle",
+    jobTitle: "Growth Lead",
+    department: "Marketing",
+    mission: "Find repeatable ways to reach the target customer.",
+    preamble: "You are bold and action-oriented.",
+    additionalDetails: "Bias toward shipping and iterating.",
+    responsibilities: ["Own the GTM motion", "Run acquisition experiments", "Report on funnel metrics"],
+    personality: "Direct and momentum-driven.",
+    communicationStyle: "Short and punchy, bullets over prose.",
+    expertise: ["growth", "paid acquisition", "analytics"],
+  });
+
+  const emp = await ctx.db.selectFrom("employees").where("id", "=", employeeId).selectAll().executeTakeFirstOrThrow();
+  assert.equal(emp.job_title, "Growth Lead");
+  assert.equal(emp.department, "Marketing");
+  assert.equal(emp.mission, "Find repeatable ways to reach the target customer.");
+  assert.equal(emp.preamble, "You are bold and action-oriented.");
+  assert.equal(emp.additional_details, "Bias toward shipping and iterating.");
+
+  // Name is the DM conversation's name, not an employee column.
+  const conv = await ctx.db.selectFrom("conversations").where("id", "=", conversationId).select("name").executeTakeFirstOrThrow();
+  assert.equal(conv.name, "Ivana Tinkle");
+
+  const resp = await listResponsibilities(ctx, employeeId);
+  assert.deepEqual(resp.map((r) => r.text), ["Own the GTM motion", "Run acquisition experiments", "Report on funnel metrics"]);
+  assert.deepEqual(resp.map((r) => r.position), [0, 1, 2], "responsibilities keep insertion order");
+
+  const profile = await getAgentProfile(ctx, employeeId);
+  assert.equal(profile.personality, "Direct and momentum-driven.");
+  assert.equal(profile.communicationStyle, "Short and punchy, bullets over prose.");
+  assert.deepEqual(profile.expertise, ["growth", "paid acquisition", "analytics"]);
+
+  await ctx.db.destroy();
+});
+
+test("applyOnboarding (full personas): hires are fully populated and added to the new channels", async () => {
+  const { applyOnboarding } = await import("../domains/onboarding/service");
+  const { listResponsibilities, listChannelMembers } = await import("../domains/employees/service");
+  const ctx = freshCtx();
+  const { id: companyId } = await createCompany(ctx, { name: "Acme" }, { kind: "user" });
+
+  const { conversationIds } = await applyOnboarding(ctx, {
+    companyId,
+    companyName: "Acme",
+    profile: "An early-stage SaaS company.",
+    systemPrompt: "Be direct and proactive.",
+    roles: [
+      {
+        jobTitle: "Full-Stack Engineer",
+        department: "Engineering",
+        name: "Rusty Shackleford",
+        avatar: "data:image/png;base64,AAAA",
+        mission: "Ship the core product quickly.",
+        preamble: "You are methodical and rigorous.",
+        additionalDetails: "Flag risks early.",
+        responsibilities: ["Build the product end to end", "Own deploys"],
+        personality: "Calm and precise.",
+        communicationStyle: "Structured, leads with the recommendation.",
+        expertise: ["typescript", "systems design"],
+      },
+    ],
+    channels: ["product"],
+  });
+
+  assert.equal(conversationIds.length, 1);
+
+  const emp = await ctx.db.selectFrom("employees").where("company_id", "=", companyId).where("job_title", "=", "Full-Stack Engineer").selectAll().executeTakeFirstOrThrow();
+  assert.equal(emp.mission, "Ship the core product quickly.");
+  assert.equal(emp.preamble, "You are methodical and rigorous.");
+  assert.equal(emp.avatar, "data:image/png;base64,AAAA");
+
+  const conv = await ctx.db.selectFrom("conversations").where("id", "=", emp.conversation_id).select("name").executeTakeFirstOrThrow();
+  assert.equal(conv.name, "Rusty Shackleford", "display name = picked candidate name, not the job title");
+
+  const resp = await listResponsibilities(ctx, emp.id);
+  assert.deepEqual(resp.map((r) => r.text), ["Build the product end to end", "Own deploys"]);
+
+  // The new hire is a member of the newly-created #product channel.
+  const channel = await ctx.db.selectFrom("conversations").where("company_id", "=", companyId).where("kind", "=", "channel").where("name", "=", "product").select("id").executeTakeFirstOrThrow();
+  const members = await listChannelMembers(ctx, channel.id);
+  assert.ok(members.some((m) => m.id === emp.id), "hire added to the correlated channel");
+
+  await ctx.db.destroy();
+});
+
+test("generateCandidates fallback: returns exactly 3 distinct, fully-populated personas", async () => {
+  const { fallbackCandidates } = await import("../domains/employees/candidates");
+  const cands = fallbackCandidates("Customer Support Lead", "Support", 3);
+  assert.equal(cands.length, 3);
+  // Distinct personalities, not three phrasings of one.
+  assert.equal(new Set(cands.map((c) => c.personalityLabel)).size, 3);
+  for (const c of cands) {
+    assert.ok(c.mission.length > 0, "mission populated");
+    assert.ok(c.preamble.includes("Customer Support Lead"), "preamble is role-specific and second-person");
+    assert.ok(c.responsibilities.length >= 3, "responsibilities populated");
+    assert.ok(c.additionalDetails.length > 0, "additional details populated");
+  }
+
+  await Promise.resolve();
+});
+
+test("globalSearch: finds channels, people, and messages (incl. thread replies), scoped to the company", async () => {
+  const { createChannel } = await import("../domains/conversations/service");
+  const { createEmployee } = await import("../domains/employees/service");
+  const { globalSearch } = await import("../domains/search/service");
+  const ctx = freshCtx();
+  const { id: companyId } = await createCompany(ctx, { name: "Acme" }, { kind: "user" });
+  const { id: otherId } = await createCompany(ctx, { name: "Globex" }, { kind: "user" });
+
+  const { conversationId: channelId } = await createChannel(ctx, companyId, "product-roadmap");
+  await createEmployee(ctx, { companyId, name: "Rusty Shackleford", jobTitle: "Growth Lead", department: "Marketing" });
+
+  const rootId = randomUUID();
+  const replyId = randomUUID();
+  await ctx.db.insertInto("messages").values({ id: rootId, conversation_id: channelId, role: "user", content: "let's set the pricing strategy", status: "complete" }).execute();
+  await ctx.db.insertInto("messages").values({ id: replyId, conversation_id: channelId, role: "user", content: "pricing update inside the thread", status: "complete", thread_root_id: rootId }).execute();
+
+  // Data in a different company must never surface.
+  const { conversationId: otherChannel } = await createChannel(ctx, otherId, "pricing-secrets");
+  await ctx.db.insertInto("messages").values({ id: randomUUID(), conversation_id: otherChannel, role: "user", content: "globex pricing memo", status: "complete" }).execute();
+
+  const byChannel = await globalSearch(ctx, companyId, "roadmap");
+  assert.ok(byChannel.channels.some((c) => c.name === "product-roadmap"), "channel matched by name");
+
+  const byPerson = await globalSearch(ctx, companyId, "growth");
+  assert.ok(byPerson.people.some((p) => p.name === "Rusty Shackleford" && p.jobTitle === "Growth Lead"), "person matched by job title");
+
+  const byMessage = await globalSearch(ctx, companyId, "pricing");
+  const msgIds = byMessage.messages.map((m) => m.messageId);
+  assert.ok(msgIds.includes(rootId), "top-level message matched by content");
+  assert.ok(msgIds.includes(replyId), "thread reply matched by content");
+  // Nothing from Globex leaks into Acme's results.
+  assert.ok(byMessage.messages.every((m) => m.conversationId !== otherChannel), "results are company-scoped");
+  assert.ok(!byMessage.channels.some((c) => c.name === "pricing-secrets"), "other company's channel not returned");
+
+  await ctx.db.destroy();
+});
+
 test("dispatch: validateInbound rejects malformed messages before dispatch() ever sees them (report §1.4/§3.3)", async () => {
   const { validateInbound, dispatch } = await import("../runtime/dispatch");
   const ctx = freshCtx();
@@ -929,6 +1087,139 @@ test("claudeMessageSendTool: message_send MCP handler goes through the real capa
   assert.equal(row.conversation_id, generalConversationId);
 
   await ctx.db.destroy();
+});
+
+test("drainNotifications: joins author name/avatar + thread root, then marks messages seen", async () => {
+  const { drainNotifications } = await import("../domains/settings/service");
+  const { createEmployee } = await import("../domains/employees/service");
+  const { createChannel } = await import("../domains/conversations/service");
+  const ctx = freshCtx();
+  const { id: companyId } = await createCompany(ctx, { name: "Acme" }, { kind: "user" });
+  const { employeeId } = await createEmployee(ctx, {
+    companyId,
+    name: "Rusty Shackleford",
+    jobTitle: "Growth Lead",
+    department: "Marketing",
+    avatar: "data:image/png;base64,BBBB",
+  });
+  const { conversationId: channelId } = await createChannel(ctx, companyId, "war-room");
+
+  const rootId = randomUUID();
+  const msgId = randomUUID();
+  await ctx.db.insertInto("messages").values({ id: rootId, conversation_id: channelId, role: "user", content: "kick off", status: "complete" }).execute();
+  await ctx.db
+    .insertInto("messages")
+    .values({ id: msgId, conversation_id: channelId, role: "assistant", content: "on it", status: "complete", author_employee_id: employeeId, thread_root_id: rootId })
+    .execute();
+
+  const pending = await drainNotifications(ctx);
+  const hit = pending.find((p) => p.id === msgId);
+  assert.ok(hit, "the completed assistant message is drained");
+  assert.equal(hit!.author_name, "Rusty Shackleford", "author name resolves to the author employee's DM conversation name");
+  assert.equal(hit!.author_avatar, "data:image/png;base64,BBBB", "author avatar joined in");
+  assert.equal(hit!.conversation_name, "war-room");
+  assert.equal(hit!.conversation_kind, "channel");
+  assert.equal(hit!.company_name, "Acme");
+  assert.equal(hit!.thread_root_id, rootId, "thread root carried through for jump-into-thread");
+
+  // Draining is atomic: a second call must not re-surface the same message.
+  const second = await drainNotifications(ctx);
+  assert.ok(!second.some((p) => p.id === msgId), "an already-drained message is not returned again");
+
+  await ctx.db.destroy();
+});
+
+test("globalSearch: LIKE wildcards in the query are escaped to literal characters", async () => {
+  const { globalSearch } = await import("../domains/search/service");
+  const ctx = freshCtx();
+  const { id: companyId } = await createCompany(ctx, { name: "Acme" }, { kind: "user" });
+  // Insert directly to control the exact names (a literal % and a literal _).
+  await ctx.db.insertInto("conversations").values({ id: randomUUID(), company_id: companyId, kind: "channel", name: "100% done" }).execute();
+  await ctx.db.insertInto("conversations").values({ id: randomUUID(), company_id: companyId, kind: "channel", name: "a_b_c" }).execute();
+  // (createCompany already seeded a #general channel, used as the negative control.)
+
+  const pct = await globalSearch(ctx, companyId, "%");
+  const pctNames = pct.channels.map((c) => c.name);
+  assert.ok(pctNames.includes("100% done"), "a literal % in the query matches a literal %");
+  assert.ok(!pctNames.includes("general"), "% is escaped, not treated as a match-everything wildcard");
+
+  const und = await globalSearch(ctx, companyId, "_");
+  const undNames = und.channels.map((c) => c.name);
+  assert.ok(undNames.includes("a_b_c"), "a literal _ in the query matches a literal _");
+  assert.ok(!undNames.includes("general"), "_ is escaped, not treated as a single-char wildcard");
+
+  await ctx.db.destroy();
+});
+
+test("generateCandidates (LLM path): uses the model's JSON (unfenced from a code block) and tops up a short reply", async () => {
+  const { generateCandidates } = await import("../domains/employees/candidates");
+  const ctx = freshCtx();
+  const { id: companyId } = await createCompany(ctx, { name: "Acme" }, { kind: "user" });
+  // Model returns only 2 usable candidates (fewer than the requested 3), wrapped in
+  // a ```json fence so extractJson has to pull it out.
+  const modelJson =
+    "Here you go:\n```json\n" +
+    JSON.stringify([
+      { personalityLabel: "Sharp analyst", summary: "s1", mission: "Own analytics", preamble: "You are rigorous and data-led.", responsibilities: ["a", "b"], additionalDetails: "x", personality: "p1", communicationStyle: "c1", expertise: ["sql"] },
+      { personalityLabel: "Bold operator", summary: "s2", mission: "Drive growth", preamble: "You move fast and decide.", responsibilities: ["c"], additionalDetails: "y", personality: "p2", communicationStyle: "c2", expertise: ["growth"] },
+    ]) +
+    "\n```";
+
+  const cands = await generateCandidates(ctx, { companyId, jobTitle: "Data Analyst", department: "Data", count: 3 }, scriptedProvider(modelJson));
+
+  assert.equal(cands.length, 3, "a short model reply is topped up to the requested count");
+  assert.equal(cands[0].mission, "Own analytics", "first candidate is the model's, not a fallback");
+  assert.equal(cands[1].mission, "Drive growth");
+  assert.ok(cands[2].preamble.includes("Data Analyst"), "the top-up filler is a role-specific fallback archetype");
+
+  await ctx.db.destroy();
+});
+
+test("generateCandidates (LLM path): falls back entirely when the model returns unparseable junk", async () => {
+  const { generateCandidates } = await import("../domains/employees/candidates");
+  const ctx = freshCtx();
+  const { id: companyId } = await createCompany(ctx, { name: "Acme" }, { kind: "user" });
+
+  const cands = await generateCandidates(ctx, { companyId, jobTitle: "Recruiter", department: "People", count: 3 }, scriptedProvider("sorry, I can't help with that"));
+
+  assert.equal(cands.length, 3);
+  assert.equal(new Set(cands.map((c) => c.personalityLabel)).size, 3, "distinct fallback archetypes, not three copies");
+  for (const c of cands) assert.ok(c.preamble.includes("Recruiter"), "fallbacks are role-specific");
+
+  await ctx.db.destroy();
+});
+
+test("checkProviderHealth: a detected credential short-circuits the live ping", async () => {
+  const { checkProviderHealth } = await import("../domains/health/service");
+  let pinged = false;
+  const health = await checkProviderHealth({
+    claudePresence: () => ({ available: true, via: "ANTHROPIC_API_KEY environment variable" }),
+    codexPresence: () => ({ available: false, via: "" }),
+    getProvider: () => {
+      pinged = true;
+      throw new Error("ping should not run on the presence fast path");
+    },
+  });
+  assert.equal(health.anyAvailable, true);
+  assert.equal(health.providers.find((p) => p.provider === "claude")!.available, true);
+  assert.equal(pinged, false, "no live ping is spent when a credential is already detected");
+});
+
+test("checkProviderHealth: with nothing detected, pings — success is available, failure carries the provider's error", async () => {
+  const { checkProviderHealth } = await import("../domains/health/service");
+  const none = () => ({ available: false, via: "" });
+  const health = await checkProviderHealth({
+    claudePresence: none,
+    codexPresence: none,
+    getProvider: (name) => (name === "claude" ? scriptedProvider("ok") : scriptedProvider("", { success: false, errorMessage: "invalid api key" })),
+  });
+  const claude = health.providers.find((p) => p.provider === "claude")!;
+  const codex = health.providers.find((p) => p.provider === "codex")!;
+  assert.equal(claude.available, true);
+  assert.equal(claude.detail, "Reachable.");
+  assert.equal(codex.available, false);
+  assert.match(codex.detail, /invalid api key/, "a failed ping surfaces the provider's own error message");
+  assert.equal(health.anyAvailable, true, "one working provider is enough");
 });
 
 // keep tmp dir from filling forever in CI

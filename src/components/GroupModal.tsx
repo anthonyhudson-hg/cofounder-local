@@ -3,8 +3,8 @@ import { useMemo, useState } from "react";
 import { useAsyncAction } from "../hooks/useAsyncAction";
 import { useEscapeToClose } from "../hooks/useEscapeToClose";
 import { Employee } from "../types";
-import { Avatar } from "./Avatar";
 import { EmployeeInfo } from "./MessageList";
+import { PersonPickerRow } from "./PersonPicker";
 
 interface Props {
   employees: Employee[];
@@ -53,39 +53,31 @@ export function GroupModal({ employees, employeesById, onCreate, onClose }: Prop
             <X />
           </button>
         </div>
-        <div className="search-modal-body">
+        <div className="person-picker-body">
           <input
-            className="search-modal-input"
+            className="person-picker-input"
             placeholder="Group name (optional)"
             value={name}
             onChange={(e) => setName(e.target.value)}
           />
           <input
             autoFocus
-            className="search-modal-input"
+            className="person-picker-input"
             placeholder="Add people…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
-          <div className="search-modal-results">
-            {filtered.length === 0 && <div className="search-modal-empty">No one matches "{query}".</div>}
+          <div className="person-picker-results">
+            {filtered.length === 0 && <div className="person-picker-empty">No one matches "{query}".</div>}
             {filtered.map((e) => (
-              <label key={e.id} className="search-modal-row group-modal-row">
-                <input type="checkbox" checked={selected.has(e.id)} onChange={() => toggle(e.id)} />
-                <Avatar
-                  name={employeesById[e.id]?.name ?? "Employee"}
-                  avatar={employeesById[e.id]?.avatar}
-                  bot
-                  className="search-modal-avatar"
-                />
-                <div className="search-modal-row-text">
-                  <div className="search-modal-row-name">{employeesById[e.id]?.name ?? "Employee"}</div>
-                  <div className="search-modal-row-meta">
-                    {e.job_title}
-                    {e.department ? ` · ${e.department}` : ""}
-                  </div>
-                </div>
-              </label>
+              <PersonPickerRow
+                key={e.id}
+                name={employeesById[e.id]?.name ?? "Employee"}
+                avatar={employeesById[e.id]?.avatar}
+                meta={`${e.job_title}${e.department ? ` · ${e.department}` : ""}`}
+                checked={selected.has(e.id)}
+                onToggle={() => toggle(e.id)}
+              />
             ))}
           </div>
           {selected.size < 2 && (

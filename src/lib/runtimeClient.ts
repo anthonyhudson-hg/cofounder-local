@@ -62,6 +62,11 @@ function touchPending(id: string): void {
 let started = false;
 let startPromise: Promise<void> | null = null;
 
+// Must match the error string sidecar.rs returns from `send_to_runtime` before the
+// runtime process has registered its stdin. Kept as a named constant so the boot
+// retry in sendToRuntimeWithRetry isn't silently coupled to a bare literal.
+const RUNTIME_NOT_RUNNING = "runtime is not running";
+
 /** Start the runtime event bus once (idempotent; safe to call from anywhere). */
 export function startRuntimeBus(): Promise<void> {
   if (started) return Promise.resolve();
@@ -98,9 +103,17 @@ export function startRuntimeBus(): Promise<void> {
         break;
       }
     }
-  }).then(() => {
-    started = true;
-  });
+  })
+    .then(() => {
+      started = true;
+    })
+    .catch((err) => {
+      // A failed listen() used to be cached forever — every later command()/query()
+      // would await the same rejected promise with no way to re-init. Clear it so a
+      // subsequent call retries subscribing.
+      startPromise = null;
+      throw err;
+    });
   return startPromise;
 }
 
@@ -124,7 +137,7 @@ async function sendToRuntimeWithRetry(message: unknown): Promise<void> {
     } catch (err) {
       lastErr = err;
       const m = err instanceof Error ? err.message : String(err);
-      if (!m.includes("runtime is not running")) throw err instanceof Error ? err : new Error(m);
+      if (!m.includes(RUNTIME_NOT_RUNNING)) throw err instanceof Error ? err : new Error(m);
       await sleep(150);
     }
   }

@@ -5,6 +5,8 @@ import type { Database } from "../../db/schema";
 import type { RuntimeContext } from "../../runtime/context";
 import { mutate, type Emit } from "../../runtime/unitOfWork";
 import { getSetting, setSetting } from "../settings/kv";
+import { DEFAULT_CHAT_MODEL, preferredProvider } from "../../providers/availability";
+import { nextPositionAfter } from "../../runtime/position";
 
 const COS_GREETING =
   "👋 I'm your Chief of Staff. I'm a blank slate right now — tell me how you'd like me to work, or just start handing me things to coordinate, track, and follow up on.";
@@ -35,6 +37,12 @@ async function seedDefaults(
       job_title: "Chief of Staff",
       department: "Executive",
       // deliberately blank — mission/preamble/additional_details default to ''
+      // Seed the model from whatever provider is configured so a Codex-only
+      // install gets a working Chief of Staff, not a Claude default that fails
+      // to send. If nothing is configured yet (very first boot before the user
+      // sets a provider up), this defaults to Claude and is repaired later by
+      // reconcileEmployeeModels once a provider becomes available.
+      default_model: DEFAULT_CHAT_MODEL[preferredProvider()],
     })
     .execute();
   await trx.insertInto("departments").values({ id: randomUUID(), company_id: companyId, name: "Executive", position: 0 }).execute();
@@ -55,7 +63,7 @@ async function nextPosition(ctx: RuntimeContext): Promise<number> {
     .selectFrom("companies")
     .select(ctx.db.fn.max("position").as("maxpos"))
     .executeTakeFirst();
-  return (Number(row?.maxpos ?? -1) || -1) + 1;
+  return nextPositionAfter(row?.maxpos);
 }
 
 export interface CreateCompanyInput {

@@ -24,6 +24,15 @@ export interface ToolContext {
   companyId: string;
   employeeId: string;
   correlationId?: string | null;
+  /**
+   * How many message.send-triggered response cascades deep this turn already is.
+   * A user/tool-initiated channel message runs its responders at depth 0; if a
+   * responder itself calls the message.send tool, the cascade it kicks off runs
+   * at depth+1. The message.send tool refuses to start a further cascade past a
+   * fixed ceiling so two agents can't ping-pong message.send at each other
+   * forever, burning tokens with no user in the loop. Absent ⇒ 0.
+   */
+  cascadeDepth?: number;
 }
 
 export interface Tool<Input = unknown, Output = unknown> {

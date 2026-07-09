@@ -2,21 +2,19 @@ import type { Kysely } from "kysely";
 import type { Database } from "../db/schema";
 
 /**
- * A Phase-A proof of concept for a company-scoping boundary: `repos.forCompany(companyId)`
- * pre-filters every query it exposes by that id, so cross-company leakage would be
- * impossible by construction for anything routed through it. IMPORTANT — this is
- * aspirational, not yet the actual safety net for most of the app: `listConversations`
- * here is exercised only by the test suite; the `listConversations` actually wired to
- * the UI lives in `domains/conversations/service.ts` as a separate implementation that
- * talks to `ctx.db` directly with its own manual `.where("company_id", ...)`, and every
- * other domain service (messages, reactions, employees, agent sessions, etc.) follows
- * that same direct-`ctx.db` pattern, not this one (report §4.9). Don't assume anything
- * outside this file is protected by it — until domain services are migrated to route
- * through `repos.forCompany()`, cross-company scoping correctness depends on each
- * service remembering its own WHERE clause, same as usual.
- *
- * Domain repositories are added here as each domain is strangled onto the
- * runtime (Phase C). Phase A ships the accessor shape + two proofs.
+ * A company-scoping boundary: `repos.forCompany(companyId)` pre-filters every
+ * query it exposes by that id, so cross-company leakage would be impossible by
+ * construction for anything routed through it. IMPORTANT — this is NOT yet the
+ * actual safety net for most of the app: `listConversations` here is exercised
+ * only by the test suite; the `listConversations` actually wired to the UI lives
+ * in `domains/conversations/service.ts` as a separate implementation that talks
+ * to `ctx.db` directly with its own manual `.where("company_id", ...)`, and every
+ * other domain service (messages, reactions, employees, agent sessions, etc.)
+ * follows that same direct-`ctx.db` pattern, not this one. Don't assume anything
+ * outside this file is protected by it — until domain services are migrated to
+ * route through `repos.forCompany()`, cross-company scoping correctness depends
+ * on each service remembering its own WHERE clause, same as usual. Migrating the
+ * domains onto this accessor is tracked as a follow-up.
  */
 export interface ScopedRepositories {
   readonly companyId: string;

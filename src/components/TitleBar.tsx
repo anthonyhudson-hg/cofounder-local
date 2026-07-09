@@ -6,9 +6,11 @@ const appWindow = getCurrentWindow();
 
 interface Props {
   children?: ReactNode;
+  /** Optional centered slot (e.g. global search). Absolutely centered, not a drag region. */
+  center?: ReactNode;
 }
 
-export function TitleBar({ children }: Props) {
+export function TitleBar({ children, center }: Props) {
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
@@ -42,6 +44,7 @@ export function TitleBar({ children }: Props) {
       <div className="titlebar-content" data-tauri-drag-region>
         {children}
       </div>
+      {center && <div className="titlebar-center">{center}</div>}
       <div className="titlebar-controls">
         <button className="titlebar-btn" title="Minimize" aria-label="Minimize" onClick={() => appWindow.minimize()}>
           <Minus size={14} weight="bold" />

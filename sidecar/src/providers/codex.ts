@@ -11,10 +11,12 @@ import { AgentProvider, Effort, RunTurnOptions, TurnCancelledError, TurnChunk, T
 
 /*
  * OpenAI Codex provider. Structural analog to the Claude Agent SDK: the
- * `@openai/codex-sdk` package spawns the local `codex` CLI and exchanges JSONL
- * events over stdio, authenticated by the user's local ChatGPT login
- * (`codex login`) or `OPENAI_API_KEY` — the same "use my local subscription"
- * shape as Claude Code. The `codex` CLI must be installed and on PATH.
+ * `@openai/codex-sdk` package vendors and spawns its OWN platform-specific
+ * `codex` binary (resolved via `require.resolve` of its matching optional
+ * dependency package, not a system `codex` on PATH), exchanging JSONL events
+ * over stdio. Auth is still the user's local ChatGPT login (`codex login`) or
+ * `OPENAI_API_KEY` — the same "use my local subscription" shape as Claude Code;
+ * only the binary itself is bundled, not the auth. No system CLI install needed.
  *
  * The SDK ships as ESM-only ("type": "module"), so it is loaded via a genuine
  * dynamic import() (preserved past the CommonJS downlevel via `new Function`).
@@ -33,8 +35,8 @@ let clientPromise: Promise<CodexClient> | null = null;
 function getClient(): Promise<CodexClient> {
   if (!clientPromise) {
     clientPromise = dynamicImport("@openai/codex-sdk").then((mod) => new mod.Codex());
-    // A failed import (codex CLI not yet on PATH, transient FS hiccup) used to be
-    // cached forever — every subsequent request would re-throw the same stale
+    // A failed import (vendored codex binary missing, transient FS hiccup) used to
+    // be cached forever — every subsequent request would re-throw the same stale
     // rejection for the rest of the process's life, requiring a full app restart to
     // recover. Clear the cache on failure so the next call retries (report §3.8).
     clientPromise.catch(() => {
@@ -200,7 +202,9 @@ export class CodexProvider implements AgentProvider {
       }
 
       return {
-        sessionId: thread.id ?? sessionId,
+        // `||` not `??`: an empty-string thread.id must not win over a good sessionId
+        // captured from the `thread.started` event.
+        sessionId: thread.id || sessionId,
         success: true,
         // The Codex SDK does not report a cost estimate; token counts are the
         // reliable figures (consistent with how Claude cost is treated).

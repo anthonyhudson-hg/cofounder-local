@@ -16,7 +16,7 @@ interface Props {
  * resolve one was a hand-crafted approval.resolve IPC call.
  */
 export function ApprovalsPanel({ companyId, employeesById }: Props) {
-  const { approvals, resolve } = useApprovals(companyId);
+  const { approvals, loaded, resolve } = useApprovals(companyId);
   const [resolvingId, setResolvingId] = useState<string | null>(null);
 
   const handleResolve = async (approvalId: string, decision: "approved" | "denied") => {
@@ -35,7 +35,7 @@ export function ApprovalsPanel({ companyId, employeesById }: Props) {
         <span className="activity-sub">Actions your employees can't take without your sign-off</span>
       </div>
 
-      {approvals.length === 0 ? (
+      {!loaded ? null : approvals.length === 0 ? (
         <div className="activity-empty">Nothing waiting on you right now.</div>
       ) : (
         <ul className="approvals-list">

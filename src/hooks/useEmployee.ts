@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Employee } from "../types";
-import { command, query } from "../lib/runtimeClient";
+import { command, onRuntimeEvent, query, startRuntimeBus } from "../lib/runtimeClient";
 import { useStaleGuard } from "./useStaleGuard";
 
 export function useEmployee(conversationId: string | null) {
@@ -27,6 +27,16 @@ export function useEmployee(conversationId: string | null) {
     setLoaded(false);
     reload();
   }, [reload]);
+
+  // Keep the detail view live: reflect an employee edited through any other path
+  // (e.g. manager reassignment from the org chart), matching useEmployees' list-hook
+  // behavior rather than only refreshing on this panel's own optimistic writes.
+  useEffect(() => {
+    void startRuntimeBus();
+    return onRuntimeEvent((e) => {
+      if (employee && e.type.startsWith("employee.") && e.subjectId === employee.id) void reload();
+    });
+  }, [employee, reload]);
 
   const updateField = useCallback(
     async <K extends keyof Employee>(field: K, value: Employee[K]) => {

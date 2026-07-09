@@ -34,7 +34,14 @@ export interface PendingNotification {
   content: string;
   conversation_id: string;
   conversation_name: string;
+  /** "dm" | "channel" — the popup only offers an inline reply for DMs. */
+  conversation_kind: string;
   company_name: string | null;
+  /** Set when the message lives inside a thread — lets a notification click jump into it. */
+  thread_root_id: string | null;
+  /** The employee that sent the message (its DM-conversation name) + avatar, for the popup card. */
+  author_name: string | null;
+  author_avatar: string | null;
 }
 
 /** Return + atomically mark unnotified completed assistant messages (all companies). */
@@ -43,10 +50,22 @@ export async function drainNotifications(ctx: RuntimeContext): Promise<PendingNo
     .selectFrom("messages as m")
     .innerJoin("conversations as c", "c.id", "m.conversation_id")
     .leftJoin("companies as co", "co.id", "c.company_id")
+    .leftJoin("employees as ae", "ae.id", "m.author_employee_id")
+    .leftJoin("conversations as ac", "ac.id", "ae.conversation_id")
     .where("m.role", "=", "assistant")
     .where("m.status", "=", "complete")
     .where("m.notified_at", "is", null)
-    .select(["m.id", "m.content", "m.conversation_id", "c.name as conversation_name", "co.name as company_name"])
+    .select([
+      "m.id",
+      "m.content",
+      "m.conversation_id",
+      "c.name as conversation_name",
+      "c.kind as conversation_kind",
+      "co.name as company_name",
+      "m.thread_root_id",
+      "ac.name as author_name",
+      "ae.avatar as author_avatar",
+    ])
     .orderBy("m.created_at")
     .execute()) as PendingNotification[];
 

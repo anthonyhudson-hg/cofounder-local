@@ -7,9 +7,17 @@ import { formatReactionNoticesForPrompt } from "../../runtime/reactionFormatting
 import { findMentions, type MentionTarget } from "../../runtime/mentions";
 import { modelProvider } from "../../runtime/models";
 import { getProvider, drainTurn, TurnCancelledError, type AgentProvider, type Effort, type TurnChunk, type TurnResult } from "../../providers";
+import { preferredProvider, RELEVANCE_MODEL } from "../../providers/availability";
 import { resolveManagerName, employeeDisplayName, listChannelMembers, listResponsibilities, getAgentProfile } from "../employees/service";
 import { getUserProfile } from "../settings/service";
 import { registerTurn, unregisterTurn } from "../../runtime/turnRegistry";
+
+const VALID_EFFORTS: ReadonlySet<string> = new Set<Effort>(["low", "medium", "high", "xhigh", "max"]);
+/** Clamp a stored (possibly stale or hand-corrupted) effort value to a valid Effort
+ *  before it reaches provider-specific effort mapping, rather than casting blindly. */
+function coerceEffort(value: string | null | undefined): Effort {
+  return value && VALID_EFFORTS.has(value) ? (value as Effort) : "medium";
+}
 
 /**
  * A stored session id can go stale outside this app's control (the SDK's own
@@ -41,6 +49,10 @@ async function runTurnGated<T>(
   registryKey: string,
   resume: string | null,
   attempt: (resumeSessionId: string | null, abortSignal: AbortSignal) => Promise<T>,
+  // Fired just before a stale-session retry. The first attempt may already have
+  // streamed partial text to the client; this lets the caller tell the client to
+  // discard it so the retry's text doesn't append onto the abandoned attempt's.
+  onRetry?: () => void,
 ): Promise<T> {
   const abortController = new AbortController();
   registerTurn(registryKey, abortController);
@@ -49,6 +61,7 @@ async function runTurnGated<T>(
       return await attempt(resume, abortController.signal);
     } catch (err) {
       if (resume && isStaleSessionError(err)) {
+        onRetry?.();
         return await attempt(null, abortController.signal);
       }
       throw err;
@@ -207,37 +220,6 @@ async function companyOfMessage(ctx: RuntimeContext, messageId: string): Promise
   return row ? companyOf(ctx, row.conversation_id) : null;
 }
 
-export async function insertUserMessage(
-  ctx: RuntimeContext,
-  m: { id: string; conversationId: string; content: string; threadRootId?: string | null; replyToMessageId?: string | null },
-): Promise<void> {
-  const companyId = await companyOf(ctx, m.conversationId);
-  await mutate(ctx, async (trx, emit) => {
-    await trx.insertInto("messages").values({
-      id: m.id, conversation_id: m.conversationId, role: "user", content: m.content, status: "complete",
-      thread_root_id: m.threadRootId ?? null, reply_to_message_id: m.replyToMessageId ?? null,
-    }).execute();
-    await emit({ companyId, type: "message.created", subjectId: m.id, actor: { kind: "user" }, payload: { conversationId: m.conversationId, role: "user" } });
-  });
-}
-
-export async function insertAssistantPlaceholder(
-  ctx: RuntimeContext,
-  m: { id: string; conversationId: string; model: string; effort: string; debugPayload?: string | null; threadRootId?: string | null; authorEmployeeId: string },
-): Promise<void> {
-  // Was a raw ctx.db write with no emit — violated the "every command goes through
-  // mutate() so state and its event log never diverge" invariant (runtime/unitOfWork.ts)
-  // that this function's own sibling insertUserMessage already follows (report §1.5).
-  const companyId = await companyOf(ctx, m.conversationId);
-  await mutate(ctx, async (trx, emit) => {
-    await trx.insertInto("messages").values({
-      id: m.id, conversation_id: m.conversationId, role: "assistant", content: "", model: m.model, effort: m.effort,
-      status: "streaming", debug_payload: m.debugPayload ?? null, thread_root_id: m.threadRootId ?? null, author_employee_id: m.authorEmployeeId,
-    }).execute();
-    await emit({ companyId, type: "message.created", subjectId: m.id, actor: { kind: "employee", employeeId: m.authorEmployeeId }, payload: { conversationId: m.conversationId, role: "assistant" } });
-  });
-}
-
 export async function insertChannelAssistantMessage(
   ctx: RuntimeContext,
   m: { id: string; conversationId: string; content: string; model: string; effort: string; debugPayload?: string | null; threadRootId?: string | null; replyToMessageId?: string | null; authorEmployeeId: string; usage: { inputTokens: number; outputTokens: number; cacheCreationInputTokens: number; cacheReadInputTokens: number }; totalCostUsd: number },
@@ -264,43 +246,6 @@ export async function insertErrorMessage(
       id: m.id, conversation_id: m.conversationId, role: "assistant", content: "", status: "error", error_message: m.errorMessage, author_employee_id: m.authorEmployeeId,
     }).execute();
     await emit({ companyId, type: "message.created", subjectId: m.id, actor: { kind: "employee", employeeId: m.authorEmployeeId }, payload: { conversationId: m.conversationId, role: "assistant", status: "error" } });
-  });
-}
-
-export async function finalizeMessage(
-  ctx: RuntimeContext,
-  m: { id: string; content: string; usage: { inputTokens: number; outputTokens: number; cacheCreationInputTokens: number; cacheReadInputTokens: number }; totalCostUsd: number },
-): Promise<void> {
-  const row = await ctx.db.selectFrom("messages").where("id", "=", m.id).select("conversation_id").executeTakeFirst();
-  const companyId = row ? await companyOf(ctx, row.conversation_id) : null;
-  await mutate(ctx, async (trx, emit) => {
-    await trx.updateTable("messages").set({
-      content: m.content, status: "complete", input_tokens: m.usage.inputTokens, output_tokens: m.usage.outputTokens,
-      cache_creation_input_tokens: m.usage.cacheCreationInputTokens, cache_read_input_tokens: m.usage.cacheReadInputTokens, total_cost_usd: m.totalCostUsd,
-    }).where("id", "=", m.id).execute();
-    await emit({ companyId, type: "message.completed", subjectId: m.id, actor: { kind: "system" }, payload: {} });
-  });
-}
-
-export async function setMessageError(ctx: RuntimeContext, id: string, message: string): Promise<void> {
-  const companyId = await companyOfMessage(ctx, id);
-  await mutate(ctx, async (trx, emit) => {
-    await trx.updateTable("messages").set({ status: "error", error_message: message }).where("id", "=", id).execute();
-    await emit({ companyId, type: "message.errored", subjectId: id, actor: { kind: "system" }, payload: {} });
-  });
-}
-
-export async function getConversationSession(ctx: RuntimeContext, conversationId: string) {
-  return (
-    (await ctx.db.selectFrom("conversations").where("id", "=", conversationId).select(["session_id", "session_provider"]).executeTakeFirst()) ?? null
-  );
-}
-
-export async function setConversationSession(ctx: RuntimeContext, conversationId: string, sessionId: string, provider: string): Promise<void> {
-  const companyId = await companyOf(ctx, conversationId);
-  await mutate(ctx, async (trx, emit) => {
-    await trx.updateTable("conversations").set({ session_id: sessionId, session_provider: provider }).where("id", "=", conversationId).execute();
-    await emit({ companyId, type: "conversation.sessionSet", subjectId: conversationId, actor: { kind: "system" }, payload: { provider } });
   });
 }
 
@@ -459,8 +404,12 @@ export async function sendMessage(
   const { userFullName } = await getUserProfile(ctx);
 
   const model = input.model ?? employee.default_model;
-  const effort = (input.effort ?? employee.default_effort) as Effort;
-  const providerName = input.provider ?? "claude";
+  const effort = coerceEffort(input.effort ?? employee.default_effort);
+  // The client normally passes the provider explicitly (resolved from the chosen
+  // model), but derive it from the model as a safety net rather than blindly
+  // defaulting to Claude — otherwise a Codex model with a missing provider field
+  // would be sent to Claude and fail.
+  const providerName = input.provider ?? modelProvider(model);
   const resume = conv.session_provider === providerName ? conv.session_id : null;
 
   // 1. persist the user message (optionally inside an existing thread)
@@ -575,7 +524,7 @@ export async function sendMessage(
         }),
         onChunk,
       );
-    });
+    }, () => sink.delta("text", { messageId: assistantMessageId, text: "", reset: true }));
 
     const reactMatch = full.match(/\n*\[\[react:(\S+)\]\]\s*$/);
     const finalContent = reactMatch ? full.slice(0, reactMatch.index).trimEnd() : full;
@@ -656,9 +605,9 @@ export async function sendMessage(
 // to port from — this replicates useChannel.ts's sendToMembers() plus the legacy
 // sidecar's handleCheckRelevance/handleSendChannel entirely server-side) ----
 
-// Relevance gatekeeping is always a cheap, internal Claude call regardless of which
-// provider the employee actually chats with — ported from the legacy sidecar.
-const RELEVANCE_CHECK_MODEL = "claude-haiku-4-5-20251001";
+// Relevance gatekeeping is a cheap, internal call on whichever provider is
+// configured (preferring Claude's dedicated cheap model when available),
+// regardless of which provider the employee actually chats with.
 
 function extractJson(text: string): string {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
@@ -729,6 +678,7 @@ function buildChannelSystemPrompt(
 
 async function checkMemberRelevance(
   provider: AgentProvider,
+  model: string,
   employeeContext: string,
   channelName: string,
   triggerMessage: string,
@@ -743,7 +693,7 @@ async function checkMemberRelevance(
   try {
     let raw = "";
     await drainTurn(
-      provider.runTurn({ model: RELEVANCE_CHECK_MODEL, effort: "low", systemPrompt, prompt: triggerMessage }),
+      provider.runTurn({ model, effort: "low", systemPrompt, prompt: triggerMessage }),
       (chunk) => {
         if (chunk.kind === "text") raw += chunk.text;
       },
@@ -816,6 +766,8 @@ export async function runChannelResponders(
     correlationId?: string | null;
     relevanceProviderOverride?: AgentProvider;
     responderProviderOverride?: AgentProvider;
+    /** Cascade depth this batch of responders runs at (see ToolContext.cascadeDepth). */
+    cascadeDepth?: number;
   } = {},
 ): Promise<ChannelResponderOutcome[]> {
   const conv = await ctx.db.selectFrom("conversations").where("id", "=", conversationId).select(["name"]).executeTakeFirstOrThrow();
@@ -856,7 +808,9 @@ export async function runChannelResponders(
     .filter((t) => t.label);
   const mentionedConvIds = new Set(findMentions(triggerText, memberTargets).map((x) => x.target.conversationId));
   const hasMentions = mentionedConvIds.size > 0;
-  const relevanceProvider = options.relevanceProviderOverride ?? getProvider("claude");
+  const relevanceProviderName = preferredProvider();
+  const relevanceProvider = options.relevanceProviderOverride ?? getProvider(relevanceProviderName);
+  const relevanceModel = RELEVANCE_MODEL[relevanceProviderName];
 
   const relevanceResults = await Promise.all(
     members.map(async (member) => {
@@ -869,7 +823,7 @@ export async function runChannelResponders(
       const identityBlock = buildIdentityBlock(memberNames.get(member.id) ?? "Employee", member, managerName);
       const responsibilityRows = await listResponsibilities(ctx, member.id);
       const employeeContext = `${identityBlock}\nMission: ${member.mission}\nResponsibilities: ${responsibilityRows.map((r) => r.text).join("; ") || "(none listed)"}`;
-      const { respond, reason } = await checkMemberRelevance(relevanceProvider, employeeContext, conv.name, triggerText);
+      const { respond, reason } = await checkMemberRelevance(relevanceProvider, relevanceModel, employeeContext, conv.name, triggerText);
       return { member, respond, reason };
     }),
   );
@@ -931,16 +885,16 @@ export async function runChannelResponders(
           return drainTurn(
             provider.runTurn({
               model: member.default_model,
-              effort: member.default_effort as Effort,
+              effort: coerceEffort(member.default_effort),
               systemPrompt,
               prompt: promptWithNotices,
               resumeSessionId: resume,
-              agentTools: { ctx, companyId, employeeId: member.id, correlationId: options.correlationId ?? null },
+              agentTools: { ctx, companyId, employeeId: member.id, correlationId: options.correlationId ?? null, cascadeDepth: options.cascadeDepth ?? 0 },
               abortSignal,
             }),
             onChunk,
           );
-        });
+        }, () => sink.delta("channelText", { employeeId: member.id, text: "", reset: true }));
 
         const { control, text } = parseChannelControl(fullText);
 

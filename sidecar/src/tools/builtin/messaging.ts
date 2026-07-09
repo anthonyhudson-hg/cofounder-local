@@ -5,6 +5,12 @@ import { runChannelResponders } from "../../domains/conversations/service";
 import { registerTool } from "../registry";
 import type { Tool, ToolContext } from "../types";
 
+// How many message.send-triggered cascades may chain before we stop kicking off
+// more responders. Depth 0 is the original user/tool post; each responder that
+// itself calls message.send bumps it. 3 leaves room for a genuine short relay
+// (A pings B, B loops in C) while cutting off an unbounded A↔B ping-pong.
+const MAX_CASCADE_DEPTH = 3;
+
 interface SendInput {
   conversationName: string;
   text: string;
@@ -93,15 +99,30 @@ const messageSend: Tool<SendInput, SendOutput> = {
     // long that cascade takes; a human posting in Slack doesn't wait for
     // replies either. excludeEmployeeId keeps the poster from relevance-
     // gating against (and potentially replying to) its own post.
-    const noOpSink = { delta: () => {} };
-    void runChannelResponders(tc.ctx, tc.companyId, match.id, messageId, input.text, noOpSink, {
-      excludeEmployeeId: tc.employeeId,
-      correlationId: tc.correlationId,
-    }).catch((err) => {
+    //
+    // The message still posts unconditionally above; the guard here only stops
+    // us from AUTO-TRIGGERING yet another round of responders once a cascade has
+    // gone too deep, which is the only thing that can run away — two agents each
+    // calling message.send in response to the other, forever, with no user in
+    // the loop (report T1.1). Past the ceiling the post simply lands quietly, as
+    // if a human had typed it, rather than kicking off more turns.
+    const depth = tc.cascadeDepth ?? 0;
+    if (depth < MAX_CASCADE_DEPTH) {
+      const noOpSink = { delta: () => {} };
+      void runChannelResponders(tc.ctx, tc.companyId, match.id, messageId, input.text, noOpSink, {
+        excludeEmployeeId: tc.employeeId,
+        correlationId: tc.correlationId,
+        cascadeDepth: depth + 1,
+      }).catch((err) => {
+        process.stderr.write(
+          `[message.send tool] response cascade for conversation ${match.id} failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      });
+    } else {
       process.stderr.write(
-        `[message.send tool] response cascade for conversation ${match.id} failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        `[message.send tool] cascade depth ${depth} reached MAX_CASCADE_DEPTH (${MAX_CASCADE_DEPTH}) in conversation ${match.id}; posting without triggering further responders\n`,
       );
-    });
+    }
 
     return { conversationName: match.name, messageId };
   },
