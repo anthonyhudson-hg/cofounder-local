@@ -16,6 +16,7 @@ import { listGrants, grantCapability, revokeCapability } from "../tools/capabili
 import type { Effect } from "../tools/types";
 import { registerMemoryTools } from "../tools/builtin/memory";
 import { registerMessagingTools } from "../tools/builtin/messaging";
+import { registerFilesystemTools } from "../tools/builtin/filesystem";
 import { registerQuestionTools, answerQuestion, listQuestions } from "./questions/service";
 import type { SubAnswer } from "./questions/spec";
 import { registerGithubConnector } from "../connectors/github";
@@ -86,6 +87,7 @@ import type { ToolContext } from "../tools/types";
 registerMemoryTools();
 registerMessagingTools();
 registerQuestionTools();
+registerFilesystemTools();
 registerGithubConnector();
 
 register("command:company.create", async (ctx, inbound) => {

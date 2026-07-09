@@ -9,6 +9,7 @@ import { modelProvider } from "../../runtime/models";
 import { getProvider, drainTurn, TurnCancelledError, type AgentProvider, type Effort, type TurnChunk, type TurnResult } from "../../providers";
 import { preferredProvider, RELEVANCE_MODEL } from "../../providers/availability";
 import { resolveManagerName, employeeDisplayName, listChannelMembers, listResponsibilities, getAgentProfile } from "../employees/service";
+import { listProjectsForEmployee } from "../projects/service";
 import { getUserProfile } from "../settings/service";
 import { registerTurn, unregisterTurn } from "../../runtime/turnRegistry";
 import { createTurnStatus, emitStatus, emitStatusDone, friendlyToolName, statusSnippet } from "../../runtime/agentStatus";
@@ -19,6 +20,20 @@ import { createTurnStatus, emitStatus, emitStatusDone, friendlyToolName, statusS
  * structured question card that blocks for the answer); Codex agents can't
  * register host tools, so they're told to ask in prose and stop instead.
  */
+/**
+ * Guidance appended to a turn's system prompt listing the projects (codebases)
+ * this employee may work in, and how to act on them. Returns "" when it has no
+ * projects, so a non-coding employee's prompt is unchanged. The tools themselves
+ * enforce the capability gate; this just tells the agent what's available and how
+ * to pick — matching the "infer the project from context, ask if unclear" model.
+ */
+async function projectGuidanceFor(ctx: RuntimeContext, employeeId: string): Promise<string> {
+  const projects = await listProjectsForEmployee(ctx, employeeId);
+  if (projects.length === 0) return "";
+  const list = projects.map((p) => `- ${p.name} (id: ${p.id})${p.remote_url ? "" : " [local-only]"}`).join("\n");
+  return `\n\n---\n\nYou can work on these projects (codebases):\n${list}\n\nTo make changes: call \`task_open\` with the projectId to get an isolated git worktree, then \`fs_read\`/\`fs_list\`/\`fs_search\` to explore and \`fs_create\`/\`fs_edit\` to change files, \`shell_run\` to build/test, and \`git_open_pr\` when done. Pick the project from context; if it's genuinely unclear which one the user means, ask them first with \`question_ask\`. All edits happen on an isolated branch and land as a pull request — never the user's live working tree. Some actions (edit/delete/shell/PR) may require the user's approval.`;
+}
+
 function askUserGuidance(providerName: string): string {
   if (providerName === "claude") {
     return "When you're genuinely blocked on a decision only the user can make — a choice between real alternatives, a missing parameter, a preference you shouldn't guess — call the `question_ask` tool to ask up to 4 structured questions and wait for the answer, rather than guessing or burying the question in prose. Reach for it liberally instead of assuming. Don't use it for things you can reasonably decide yourself.";
@@ -451,7 +466,9 @@ export async function sendMessage(
   const agentProfile = await getAgentProfile(ctx, employee.id);
   const baseSystemPrompt = composeSystemPrompt(company.profile, company.system_prompt, identity, employee, responsibilities, agentProfile);
   const mentionScope = `This is a private 1:1 DM between you and ${userFullName || "the founder"}. There is nobody else here to @mention — do not @mention any other employee in this conversation.`;
-  const systemPrompt = `${baseSystemPrompt}\n\n---\n\n${mentionScope}\n\n---\n\n${askUserGuidance(providerName)}\n\n---\n\nIf the message you're replying to deserves a quick reaction in addition to (or instead of, if you have nothing to add) a full reply, end your response with a line like [[react:👍]] using one relevant emoji. Omit this entirely if no reaction is warranted.`;
+  const systemPrompt =
+    `${baseSystemPrompt}\n\n---\n\n${mentionScope}\n\n---\n\n${askUserGuidance(providerName)}\n\n---\n\nIf the message you're replying to deserves a quick reaction in addition to (or instead of, if you have nothing to add) a full reply, end your response with a line like [[react:👍]] using one relevant emoji. Omit this entirely if no reaction is warranted.` +
+    (await projectGuidanceFor(ctx, employee.id));
 
   // 3. consume reaction notices since this employee's last turn
   const rawNotices = await consumeReactionNotices(ctx, employee.id, userFullName);
@@ -921,7 +938,11 @@ export async function runChannelResponders(
       const mentionScope = otherMemberNames.length
         ? `You may only @mention people who are members of this channel: ${otherMemberNames.join(", ")}. Do not @mention anyone else — they aren't part of this conversation and won't see it.`
         : `There is nobody else in this channel to @mention right now.`;
-      const systemPrompt = buildChannelSystemPrompt(`${baseSystemPrompt}\n\n---\n\n${mentionScope}\n\n---\n\n${askUserGuidance(providerName)}`, openThreads, reactionTargets);
+      const systemPrompt = buildChannelSystemPrompt(
+        `${baseSystemPrompt}\n\n---\n\n${mentionScope}\n\n---\n\n${askUserGuidance(providerName)}${await projectGuidanceFor(ctx, member.id)}`,
+        openThreads,
+        reactionTargets,
+      );
 
       const rawNotices = await consumeReactionNotices(ctx, member.id, userFullName);
       const { notices, block: noticesBlock } = formatReactionNoticesForPrompt(rawNotices);

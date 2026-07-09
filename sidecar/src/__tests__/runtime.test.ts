@@ -1441,6 +1441,61 @@ test("projects + tasks: register a repo, scope an employee, materialize an isola
   await ctx.db.destroy();
 });
 
+test("filesystem tools: capability-gated CRUD in an isolated worktree (read/create autonomous; edit → approval; worktree-confined)", async () => {
+  const { invokeTool } = await import("../tools/registry");
+  const { grantCapability } = await import("../tools/capability");
+  const { createProject, setEmployeeProjects } = await import("../domains/projects/service");
+  const { runGit } = await import("../connectors/git");
+  const ctx = freshCtx();
+  const { id: companyId, cosEmployeeId: emp } = await createCompany(ctx, { name: "Acme" }, { kind: "user" });
+
+  const repo = path.join(os.tmpdir(), `cf-repo-${randomUUID()}`);
+  fs.mkdirSync(repo, { recursive: true });
+  await runGit(repo, ["init", "-q"]);
+  await runGit(repo, ["config", "user.email", "t@t.dev"]);
+  await runGit(repo, ["config", "user.name", "T"]);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello");
+  await runGit(repo, ["add", "-A"]);
+  await runGit(repo, ["commit", "-q", "-m", "init"]);
+
+  const project = await createProject(ctx, companyId, { name: "app", rootPath: repo });
+  await setEmployeeProjects(ctx, companyId, emp, [project.id]);
+  const tc = { ctx, companyId, employeeId: emp };
+
+  // No grant on tool:filesystem → even a read is denied by the gate.
+  await assert.rejects(() => invokeTool(tc, "project.list", {}), /capability denied/);
+
+  await grantCapability(ctx, companyId, emp, "tool:filesystem", "write-internal");
+
+  const pl = await invokeTool(tc, "project.list", {});
+  assert.equal(pl.status, "ok");
+  assert.ok((pl as { output: { projects: { id: string }[] } }).output.projects.some((p) => p.id === project.id));
+
+  // task.open (write-internal) is autonomous; materializes a worktree.
+  const opened = await invokeTool(tc, "task.open", { projectId: project.id, title: "Add feature" });
+  assert.equal(opened.status, "ok");
+  const taskId = (opened as { output: { taskId: string } }).output.taskId;
+
+  // fs.create (write-internal, new file) autonomous; fs.read (read) autonomous.
+  assert.equal((await invokeTool(tc, "fs.create", { taskId, path: "src/new.ts", content: "export const x = 1;\n" })).status, "ok");
+  const read = await invokeTool(tc, "fs.read", { taskId, path: "src/new.ts" });
+  assert.match((read as { output: { content: string } }).output.content, /export const x/);
+
+  // fs.edit (external-write) EXCEEDS the write-internal grant → routed to approval, NOT executed.
+  const edit = await invokeTool(tc, "fs.edit", { taskId, path: "README.md", content: "changed" });
+  assert.equal(edit.status, "approval", "editing an existing file exceeds write-internal → needs approval");
+  assert.equal(fs.readFileSync(path.join(project.root_path, "README.md"), "utf8"), "hello", "the file was NOT changed while pending approval");
+
+  // Path confinement: cannot escape the worktree.
+  await assert.rejects(() => invokeTool(tc, "fs.read", { taskId, path: "../../../etc/passwd" }), /escapes/);
+
+  // fs.create refuses to clobber an existing file (that's fs.edit's gated job).
+  await assert.rejects(() => invokeTool(tc, "fs.create", { taskId, path: "README.md", content: "x" }), /already exists/);
+
+  fs.rmSync(repo, { recursive: true, force: true });
+  await ctx.db.destroy();
+});
+
 // keep tmp dir from filling forever in CI
 test.after?.(() => {
   try {

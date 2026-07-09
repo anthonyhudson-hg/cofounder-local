@@ -40,6 +40,7 @@ function mockQueries(members: Employee[]) {
     if (type === "messages.replyCounts") return {};
     if (type === "reactions.list") return [];
     if (type === "channel.members") return members;
+    if (type === "questions.list") return [];
     throw new Error(`unexpected query in test: ${type}`);
   });
 }
