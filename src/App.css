@@ -4516,3 +4516,421 @@ body {
     color: #4ac26b;
   }
 }
+
+/* ---- Ask-user-question card (question_ask tool) ---- */
+/* Surface tokens scoped to the card: light defaults, one dark override below.
+   Interactive accents pull from the runtime theme (--accent-active) so the card
+   recolors per company. Modeled on .debug-inline's inline-card treatment. */
+.question-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.question-card {
+  --q-surface: #ffffff;
+  --q-surface-2: #f6f6f7;
+  --q-border: #e2e0e2;
+  --q-text: #1d1c1d;
+  --q-muted: #8a8a8a;
+  max-width: 640px;
+  border: 1px solid var(--q-border);
+  border-radius: var(--radius-lg, 14px);
+  background: var(--q-surface);
+  box-shadow: var(--shadow-md, 0 6px 20px rgba(0, 0, 0, 0.1));
+  overflow: hidden;
+}
+
+.question-card.is-resolved {
+  box-shadow: none;
+  background: var(--q-surface-2);
+}
+
+.question-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--q-border);
+  background: linear-gradient(180deg, rgba(91, 82, 224, 0.06), transparent);
+}
+
+.question-card.is-resolved .question-card-head {
+  background: none;
+}
+
+.question-card-icon {
+  color: var(--accent-active);
+  font-size: 1.05rem;
+  flex-shrink: 0;
+}
+
+.question-card-title {
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: var(--q-text);
+  flex: 1;
+  min-width: 0;
+}
+
+.question-card-waiting {
+  font-size: 0.72rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.question-card-status {
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.question-card-status.answered {
+  background: #e6f6ec;
+  color: #1a7f3c;
+}
+
+.question-card-status.cancelled {
+  background: #f0eef0;
+  color: #8a8a8a;
+}
+
+.question-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 14px;
+}
+
+.question-sub {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.question-sub-header {
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 700;
+  color: var(--accent-active);
+}
+
+.question-sub-required {
+  color: #d1453b;
+  margin-left: 2px;
+}
+
+.question-sub-prompt {
+  font-size: 0.9rem;
+  color: var(--q-text);
+  line-height: 1.4;
+}
+
+/* --- select options --- */
+.question-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.question-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  text-align: left;
+  padding: 10px 12px;
+  border: 1.5px solid var(--q-border);
+  border-radius: var(--radius-md, 10px);
+  background: var(--q-surface-2);
+  cursor: pointer;
+  transition: border-color 0.12s var(--ease, ease), background 0.12s var(--ease, ease), transform 0.06s var(--ease, ease);
+}
+
+.question-option:hover:not(:disabled) {
+  border-color: var(--accent-active);
+}
+
+.question-option:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.question-option.active {
+  border-color: var(--accent-active);
+  background: rgba(91, 82, 224, 0.08);
+}
+
+.question-option:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.question-option-check {
+  width: 16px;
+  height: 16px;
+  border-radius: 5px;
+  border: 1.5px solid var(--q-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: #fff;
+  font-size: 0.7rem;
+}
+
+.question-option.active .question-option-check {
+  background: var(--accent-active);
+  border-color: var(--accent-active);
+}
+
+.question-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.question-option-label {
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--q-text);
+}
+
+.question-option-desc {
+  font-size: 0.76rem;
+  color: var(--q-muted);
+  line-height: 1.35;
+}
+
+.question-option-preview {
+  margin-top: 4px;
+  font-size: 0.74rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  color: var(--q-text);
+  background: var(--q-surface);
+  border: 1px solid var(--q-border);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+/* --- text / number / date inputs --- */
+.question-text-input {
+  width: 100%;
+  font: inherit;
+  font-size: 0.88rem;
+  color: var(--q-text);
+  background: var(--q-surface);
+  border: 1.5px solid var(--q-border);
+  border-radius: var(--radius-md, 10px);
+  padding: 9px 11px;
+  outline: none;
+  transition: border-color 0.12s var(--ease, ease);
+}
+
+.question-text-input:focus {
+  border-color: var(--accent-active);
+}
+
+textarea.question-text-input {
+  resize: vertical;
+  min-height: 60px;
+}
+
+.question-other-input {
+  margin-top: 2px;
+}
+
+.question-number {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.question-number-input {
+  max-width: 140px;
+}
+
+.question-number-unit,
+.question-number-value {
+  font-size: 0.84rem;
+  color: var(--q-muted);
+  font-weight: 600;
+}
+
+.question-range {
+  flex: 1;
+  accent-color: var(--accent-active);
+}
+
+.question-date-input {
+  max-width: 200px;
+}
+
+/* --- file --- */
+.question-file {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.question-file-drop {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  padding: 8px 12px;
+  border: 1.5px dashed var(--q-border);
+  border-radius: var(--radius-md, 10px);
+  background: var(--q-surface-2);
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--q-text);
+  cursor: pointer;
+  transition: border-color 0.12s var(--ease, ease);
+}
+
+.question-file-drop:hover {
+  border-color: var(--accent-active);
+}
+
+.question-file-drop.disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.question-file-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.question-file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--q-border);
+  border-radius: 8px;
+  background: var(--q-surface-2);
+  font-size: 0.78rem;
+  color: var(--q-text);
+}
+
+.question-file-thumb {
+  max-width: 120px;
+  max-height: 90px;
+  border-radius: 8px;
+  border: 1px solid var(--q-border);
+  object-fit: cover;
+}
+
+.question-file-thumb.sm {
+  max-width: 28px;
+  max-height: 28px;
+}
+
+.question-file-remove {
+  display: inline-flex;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--q-muted);
+  cursor: pointer;
+}
+
+.question-file-remove:hover {
+  color: #d1453b;
+}
+
+/* --- footer / submit --- */
+.question-card-foot {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 14px 14px;
+}
+
+.question-submit {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 18px;
+  border: none;
+  border-radius: var(--radius-md, 10px);
+  background: var(--accent-active);
+  color: #fff;
+  font-size: 0.86rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: filter 0.12s var(--ease, ease), opacity 0.12s var(--ease, ease);
+}
+
+.question-submit:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.question-submit:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.question-submit-spinner {
+  animation: agent-spin 0.8s linear infinite;
+}
+
+/* --- resolved summary --- */
+.question-answer-summary {
+  font-size: 0.86rem;
+  color: var(--q-text);
+  font-weight: 600;
+}
+
+.question-answer-summary.muted {
+  color: var(--q-muted);
+  font-weight: 400;
+  font-style: italic;
+}
+
+.question-card-note {
+  padding: 8px 14px 12px;
+  font-size: 0.78rem;
+  color: var(--q-muted);
+}
+
+.question-card-note.error {
+  color: #d1453b;
+}
+
+@media (prefers-color-scheme: dark) {
+  .question-card {
+    --q-surface: #1e2124;
+    --q-surface-2: #24272b;
+    --q-border: #3a3d41;
+    --q-text: #d1d2d3;
+    --q-muted: #8a8d90;
+  }
+
+  .question-option.active,
+  .question-card-head {
+    background: rgba(91, 82, 224, 0.14);
+  }
+
+  .question-card.is-resolved .question-card-head {
+    background: none;
+  }
+
+  .question-card-status.answered {
+    background: rgba(26, 127, 60, 0.22);
+    color: #6bd493;
+  }
+
+  .question-card-status.cancelled {
+    background: #2f3236;
+    color: #8a8d90;
+  }
+}

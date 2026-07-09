@@ -212,6 +212,71 @@ export interface DebugPayload {
   channel?: ChannelDebugMeta;
   /** Chronological record of every live-activity status the turn emitted. */
   activityLog?: ActivityLogEntry[];
+  /** Ids of any questions the agent asked this turn (see the Questions debug section). */
+  questionIds?: string[];
+}
+
+// ---- Ask-user-question tool (mirror of sidecar/src/domains/questions/spec.ts —
+// keep in sync by hand, same Node/browser split as promptBuilder/mentions/models). ----
+
+export const QUESTION_OTHER_OPTION_LABEL = "Other";
+export const QUESTION_MAX_FILE_TOTAL_BYTES = 5 * 1024 * 1024;
+
+export interface QuestionOption {
+  label: string;
+  description?: string;
+  preview?: string;
+}
+
+export type QuestionInput =
+  | { kind: "select"; options: QuestionOption[]; multiSelect: boolean; allowOther: boolean }
+  | { kind: "text"; placeholder?: string; multiline?: boolean }
+  | { kind: "number"; min?: number; max?: number; step?: number; unit?: string; slider?: boolean }
+  | { kind: "date"; min?: string; max?: string }
+  | { kind: "file"; accept?: string; multiple?: boolean; imageOnly?: boolean };
+
+export interface SubQuestion {
+  id: string;
+  header: string;
+  question: string;
+  input: QuestionInput;
+  required: boolean;
+}
+
+export interface QuestionSpec {
+  title?: string;
+  questions: SubQuestion[];
+}
+
+export type SubAnswer =
+  | { kind: "select"; selected: string[]; other?: string }
+  | { kind: "text"; value: string }
+  | { kind: "number"; value: number }
+  | { kind: "date"; value: string }
+  | { kind: "file"; files: { name: string; mimeType: string; dataBase64: string }[] };
+
+export interface AnswerPayload {
+  answers: Record<string, SubAnswer>;
+  answeredAt: string;
+}
+
+/** A question row (spec/answers parsed) as returned by query:questions.list, or
+ *  synthesized optimistically from a "question" delta while a turn streams. */
+export interface Question {
+  id: string;
+  conversation_id: string;
+  /** DM: the asking assistant message id. Channel: null (anchored to the
+   *  responder's ephemeral row by employee instead). */
+  asking_message_id: string | null;
+  employee_id: string;
+  spec: QuestionSpec;
+  answers: AnswerPayload | null;
+  status: "pending" | "answered" | "cancelled";
+  created_at: string;
+  resolved_at: string | null;
+  /** Client-only: set when we answered but the agent was no longer waiting
+   *  (orphaned by a restart) — the answer was recorded but the turn didn't resume. */
+  orphaned?: boolean;
 }
 
 export type Provider = "claude" | "codex";

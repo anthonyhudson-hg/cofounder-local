@@ -1,7 +1,40 @@
-import { ActivityLogEntry, DebugPayload, Message, modelLabel } from "../types";
+import { ActivityLogEntry, DebugPayload, Message, modelLabel, type Question, type SubAnswer } from "../types";
 
 interface Props {
   message: Message;
+  /** Questions this assistant message asked via question_ask, if any. */
+  questions?: Question[];
+}
+
+function summarizeDebugAnswer(a: SubAnswer): string {
+  switch (a.kind) {
+    case "select":
+      return [...a.selected, ...(a.other ? [`Other: ${a.other}`] : [])].join(", ") || "(none)";
+    case "text":
+      return a.value || "(blank)";
+    case "number":
+      return String(a.value);
+    case "date":
+      return a.value || "(none)";
+    case "file":
+      return a.files.map((f) => `${f.name} (${f.mimeType})`).join(", ") || "(none)";
+  }
+}
+
+function describeInput(q: Question["spec"]["questions"][number]): string {
+  const i = q.input;
+  switch (i.kind) {
+    case "select":
+      return `select${i.multiSelect ? " (multi)" : ""}${i.allowOther ? " +other" : ""}: ${i.options.map((o) => o.label).join(" | ")}`;
+    case "text":
+      return `text${i.multiline ? " (multiline)" : ""}`;
+    case "number":
+      return `number${i.slider ? " (slider)" : ""}${i.unit ? ` ${i.unit}` : ""}`;
+    case "date":
+      return "date";
+    case "file":
+      return `file${i.imageOnly ? " (images)" : ""}${i.multiple ? " (multiple)" : ""}`;
+  }
 }
 
 function formatStepTime(iso: string): string {
@@ -15,7 +48,7 @@ function stepLabel(e: ActivityLogEntry): string {
   return e.snippet ? `${primary} — "${e.snippet}"` : primary;
 }
 
-export function DebugPanel({ message }: Props) {
+export function DebugPanel({ message, questions }: Props) {
   let payload: DebugPayload | null;
   try {
     payload = message.debug_payload ? JSON.parse(message.debug_payload) : null;
@@ -29,6 +62,25 @@ export function DebugPanel({ message }: Props) {
 
   return (
     <div className="debug-inline">
+      {questions && questions.length > 0 && (
+        <div className="debug-inline-section">
+          <div className="debug-inline-key">Questions asked ({questions.length})</div>
+          <pre className="debug-pre">
+            {questions
+              .map((q) => {
+                const head = `[${q.status}] ${q.spec.title ?? "(untitled)"} — asked ${q.created_at}${q.resolved_at ? `, resolved ${q.resolved_at}` : ""}`;
+                const subs = q.spec.questions
+                  .map((sq) => {
+                    const ans = q.answers?.answers[sq.id];
+                    return `  • ${sq.header}: ${sq.question}\n    input: ${describeInput(sq)}\n    answer: ${ans ? summarizeDebugAnswer(ans) : "(unanswered)"}`;
+                  })
+                  .join("\n");
+                return `${head}\n${subs}`;
+              })
+              .join("\n\n")}
+          </pre>
+        </div>
+      )}
       {payload.activityLog && payload.activityLog.length > 0 && (
         <div className="debug-inline-section">
           <div className="debug-inline-key">Activity timeline ({payload.activityLog.length} steps)</div>

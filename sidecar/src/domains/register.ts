@@ -16,6 +16,8 @@ import { listGrants, grantCapability, revokeCapability } from "../tools/capabili
 import type { Effect } from "../tools/types";
 import { registerMemoryTools } from "../tools/builtin/memory";
 import { registerMessagingTools } from "../tools/builtin/messaging";
+import { registerQuestionTools, answerQuestion, listQuestions } from "./questions/service";
+import type { SubAnswer } from "./questions/spec";
 import { registerGithubConnector } from "../connectors/github";
 import { cancelTurn } from "../runtime/turnRegistry";
 import {
@@ -83,6 +85,7 @@ import type { ToolContext } from "../tools/types";
 
 registerMemoryTools();
 registerMessagingTools();
+registerQuestionTools();
 registerGithubConnector();
 
 register("command:company.create", async (ctx, inbound) => {
@@ -462,4 +465,17 @@ register("query:approvals.list", async (ctx, inbound) => {
 register("query:audit.list", async (ctx, inbound) => {
   const { beforeSeq, limit } = p<{ beforeSeq?: number; limit?: number }>(inbound);
   return listEvents(ctx, requireCompany(inbound), { beforeSeq, limit });
+});
+
+// ---- ask-user-question tool round-trip ----
+register("command:question.answer", async (ctx, inbound) => {
+  const { questionId, answers } = p<{ questionId: string; answers: Record<string, SubAnswer> }>(inbound);
+  if (!questionId || typeof questionId !== "string") throw new Error("question.answer requires a questionId");
+  if (!answers || typeof answers !== "object") throw new Error("question.answer requires an answers object");
+  return answerQuestion(ctx, requireCompany(inbound), questionId, answers);
+});
+
+register("query:questions.list", async (ctx, inbound) => {
+  const { conversationId, status } = p<{ conversationId: string; status?: "pending" | "answered" | "cancelled" | null }>(inbound);
+  return listQuestions(ctx, conversationId, status === undefined ? null : status);
 });

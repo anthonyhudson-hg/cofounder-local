@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef } from "react";
 import type { LiveActivity } from "../lib/liveActivity";
 import { MentionTarget } from "../lib/mentions";
 import { focusMessageRow } from "../lib/scrollToMessage";
-import { Conversation, Message } from "../types";
+import { Conversation, Message, type Question, type SubAnswer } from "../types";
 import { Avatar } from "./Avatar";
 import { AgentWorkingRow, MessageRow } from "./MessageRow";
 
@@ -46,11 +46,16 @@ interface Props {
   /** Working agents that don't have a message row yet — rendered as synthetic
    *  rows below the conversation (channel responders pre-post, relevance gate). */
   pendingActivities?: PendingActivity[];
+  /** Structured questions the agents asked, keyed by anchor message id (DM: the
+   *  asking assistant message; channel: the responder's ephemeral row id). */
+  questions?: Record<string, Question[]>;
+  onAnswerQuestion?: (questionId: string, answers: Record<string, SubAnswer>) => void;
 }
 
 // Shared sentinel so messages with no reactions all pass the same referentially-stable
 // empty array to MessageRow instead of a fresh `[]` literal every render (report §6.1).
 const EMPTY_REACTIONS: string[] = [];
+const EMPTY_QUESTIONS: Question[] = [];
 
 // A viewport is considered "at the bottom" within this many pixels of true bottom —
 // close enough that arriving content should still auto-scroll.
@@ -72,6 +77,8 @@ export function MessageList({
   focusMessageId,
   activityFor,
   pendingActivities,
+  questions,
+  onAnswerQuestion,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
@@ -172,6 +179,8 @@ export function MessageList({
             replyAuthorName={replyAuthorName}
             replySnippet={replySnippet}
             activity={activityFor?.(m)}
+            questions={questions?.[m.id] ?? EMPTY_QUESTIONS}
+            onAnswerQuestion={onAnswerQuestion}
           />
         );
       })}

@@ -18,6 +18,9 @@ import { storeSecret, getSecret } from "../secrets/vault";
 import { companyWorkspaceRoot } from "../connectors/workspace";
 import { buildMemoryWriteToolDef } from "../providers/claudeMemoryTool";
 import { buildMessageSendToolDef } from "../providers/claudeMessageSendTool";
+import { buildAskQuestionToolDef } from "../providers/claudeAskQuestionTool";
+import { answerQuestion, listQuestions } from "../domains/questions/service";
+import type { DeltaSink } from "../runtime/dispatch";
 import { ZERO_USAGE, type AgentProvider, type TurnResult } from "../providers";
 import type { AgentStatus } from "@shared/protocol";
 
@@ -1086,6 +1089,138 @@ test("claudeMessageSendTool: message_send MCP handler goes through the real capa
   const row = await ctx.db.selectFrom("messages").where("content", "=", "Real post").selectAll().executeTakeFirstOrThrow();
   assert.equal(row.author_employee_id, emp);
   assert.equal(row.conversation_id, generalConversationId);
+
+  await ctx.db.destroy();
+});
+
+// A stub of the SDK's tool() helper: keeps only the handler so a test can drive
+// the MCP tool directly (same shape the messageSend/memory tool tests use).
+const stubAskToolFn = ((
+  _name: string,
+  _desc: string,
+  _schema: unknown,
+  handler: (args: unknown, extra: unknown) => Promise<{ isError?: boolean; content: unknown[] }>,
+) => ({ handler })) as unknown as Parameters<typeof buildAskQuestionToolDef>[0];
+
+/** First content block's text (CallToolResult content is a typed union). */
+const resultText = (r: { content: unknown[] }): string => (r.content[0] as { text: string }).text;
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- shared raw spec used at both the zod-handler and normalizeSpec call sites (different inferred types)
+const SELECT_SPEC: any = {
+  title: "Setup",
+  questions: [
+    {
+      header: "Database",
+      question: "Which database?",
+      input: { kind: "select", options: [{ label: "SQLite" }, { label: "Postgres" }], multiSelect: false, allowOther: true },
+    },
+  ],
+};
+
+async function seedDmAsking(ctx: RuntimeContext): Promise<{ companyId: string; emp: string; conversationId: string; askingMessageId: string }> {
+  const { id: companyId, cosEmployeeId: emp } = await createCompany(ctx, { name: "Acme" }, { kind: "user" });
+  const { conversation_id: conversationId } = await ctx.db.selectFrom("employees").where("id", "=", emp).select("conversation_id").executeTakeFirstOrThrow();
+  const askingMessageId = randomUUID();
+  await ctx.db.insertInto("messages").values({ id: askingMessageId, conversation_id: conversationId, role: "assistant", content: "", status: "streaming", author_employee_id: emp }).execute();
+  return { companyId, emp, conversationId, askingMessageId };
+}
+
+test("claudeAskQuestionTool: blocks mid-turn until the user answers, then returns the answer to the model", async () => {
+  const ctx = freshCtx();
+  const { companyId, emp, conversationId, askingMessageId } = await seedDmAsking(ctx);
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- delta payloads are heterogeneous; the test asserts specific shapes ad hoc
+  const deltas: { channel: string; data: any }[] = [];
+  const sink: DeltaSink = { delta: (channel, data) => deltas.push({ channel, data }) };
+  const abort = new AbortController();
+  const def = buildAskQuestionToolDef(stubAskToolFn, {
+    ctx, companyId, employeeId: emp, conversationId, askingMessageId, sink, abortSignal: abort.signal, interactive: true,
+  });
+
+  // Handler blocks — do NOT await it yet.
+  const pending = def.handler(SELECT_SPEC, {});
+
+  // The question is persisted pending and the card delta was streamed.
+  let qid: string | undefined;
+  for (let i = 0; i < 100 && !qid; i++) {
+    qid = (await listQuestions(ctx, conversationId, "pending"))[0]?.id;
+    if (!qid) await new Promise((r) => setTimeout(r, 5));
+  }
+  assert.ok(qid, "question persisted as pending while the handler blocks");
+  assert.ok(deltas.some((d) => d.channel === "question" && d.data.phase === "ask"), "the card 'ask' delta streamed");
+
+  // Answering resolves the blocked handler.
+  const res = await answerQuestion(ctx, companyId, qid!, { q1: { kind: "select", selected: ["SQLite"] } });
+  assert.equal(res.resolved, true, "a live handler was waiting and got resolved");
+
+  const result = await pending;
+  assert.equal(result.isError, undefined);
+  assert.match(resultText(result), /SQLite/, "the model gets the user's answer as the tool result");
+
+  const row = await ctx.db.selectFrom("questions").where("id", "=", qid!).selectAll().executeTakeFirstOrThrow();
+  assert.equal(row.status, "answered");
+  assert.ok(row.answers && JSON.parse(row.answers).answers.q1.selected[0] === "SQLite");
+
+  await ctx.db.destroy();
+});
+
+test("claudeAskQuestionTool: aborting the turn (user Stop) cancels the question instead of hanging", async () => {
+  const ctx = freshCtx();
+  const { companyId, emp, conversationId, askingMessageId } = await seedDmAsking(ctx);
+  const abort = new AbortController();
+  const def = buildAskQuestionToolDef(stubAskToolFn, {
+    ctx, companyId, employeeId: emp, conversationId, askingMessageId, sink: { delta: () => {} }, abortSignal: abort.signal, interactive: true,
+  });
+
+  const pending = def.handler(SELECT_SPEC, {});
+  let qid: string | undefined;
+  for (let i = 0; i < 100 && !qid; i++) {
+    qid = (await listQuestions(ctx, conversationId, "pending"))[0]?.id;
+    if (!qid) await new Promise((r) => setTimeout(r, 5));
+  }
+  assert.ok(qid);
+
+  abort.abort();
+  const result = await pending;
+  assert.equal(result.isError, true);
+  assert.match(resultText(result), /cancelled/i);
+  const row = await ctx.db.selectFrom("questions").where("id", "=", qid!).select("status").executeTakeFirstOrThrow();
+  assert.equal(row.status, "cancelled");
+
+  await ctx.db.destroy();
+});
+
+test("claudeAskQuestionTool: degrades (does not block) when no interactive user is present (background cascade)", async () => {
+  const ctx = freshCtx();
+  const { companyId, emp, conversationId } = await seedDmAsking(ctx);
+  const def = buildAskQuestionToolDef(stubAskToolFn, {
+    ctx, companyId, employeeId: emp, conversationId, askingMessageId: null, sink: { delta: () => {} }, interactive: false,
+  });
+  const result = await def.handler(SELECT_SPEC, {});
+  assert.equal(result.isError, true);
+  assert.match(resultText(result), /no interactive user/i);
+  // Nothing was persisted (it returned before asking).
+  assert.equal((await listQuestions(ctx, conversationId, null)).length, 0);
+
+  await ctx.db.destroy();
+});
+
+test("questions/service: answerQuestion validates against the spec and rejects an invalid selection", async () => {
+  const ctx = freshCtx();
+  const { companyId, emp, conversationId, askingMessageId } = await seedDmAsking(ctx);
+  const { askQuestion } = await import("../domains/questions/service");
+  const { normalizeSpec } = await import("../domains/questions/spec");
+  const qid = await askQuestion(
+    { ctx, companyId, employeeId: emp, conversationId, askingMessageId },
+    normalizeSpec(SELECT_SPEC),
+  );
+  await assert.rejects(
+    () => answerQuestion(ctx, companyId, qid, { q1: { kind: "select", selected: ["MySQL"] } }),
+    /not an option/,
+  );
+  // A no-op resolver (no handler waiting) resolves cleanly with resolved:false.
+  const ok = await answerQuestion(ctx, companyId, qid, { q1: { kind: "select", selected: ["Postgres"] } });
+  assert.equal(ok.resolved, false, "no live handler was waiting, but the answer is still recorded");
 
   await ctx.db.destroy();
 });

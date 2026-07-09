@@ -2,8 +2,21 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { command, commandStreaming, query } from "../lib/runtimeClient";
 import { useAgentActivity } from "../store/agentActivity";
 import { REACTOR_USER } from "../types";
-import { Effort, Employee, Message, Reaction, modelProvider } from "../types";
+import { Effort, Employee, Message, Reaction, modelProvider, type Question, type QuestionSpec, type SubAnswer } from "../types";
 import { useStaleGuard } from "./useStaleGuard";
+
+/** Groups question rows by their UI anchor (DM: the asking assistant message id;
+ *  cancelled ones are dropped from the chat flow — they stay in the debug view). */
+function groupQuestions(rows: Question[]): Record<string, Question[]> {
+  const grouped: Record<string, Question[]> = {};
+  for (const q of rows) {
+    if (q.status === "cancelled") continue;
+    const key = q.asking_message_id;
+    if (!key) continue;
+    (grouped[key] ??= []).push(q);
+  }
+  return grouped;
+}
 
 export interface ReplyTarget {
   messageId: string;
@@ -54,6 +67,7 @@ export function useConversation(
   const [messages, setMessages] = useState<Message[]>([]);
   const [replyCounts, setReplyCounts] = useState<Record<string, number>>({});
   const [reactions, setReactions] = useState<Record<string, string[]>>({});
+  const [questions, setQuestions] = useState<Record<string, Question[]>>({});
   const [sending, setSending] = useState(false);
   const [activeTool, setActiveTool] = useState<ActiveTool | null>(null);
   const messagesRef = useRef<Message[]>([]);
@@ -89,10 +103,12 @@ export function useConversation(
     const token = messagesGuard.begin();
     const rows = await query<Message[]>("messages.list", { conversationId }, null);
     const replyCountRows = await query<Record<string, number>>("messages.replyCounts", { conversationId }, null);
+    const questionRows = await query<Question[]>("questions.list", { conversationId }, null);
     if (!messagesGuard.isCurrent(token)) return;
     messagesRef.current = rows;
     setMessages(rows);
     setReplyCounts(replyCountRows);
+    setQuestions(groupQuestions(questionRows));
     await reloadReactions();
   }, [conversationId, reloadReactions, messagesGuard]);
 
@@ -149,6 +165,24 @@ export function useConversation(
               // lifecycle (see providers/claude.ts) — real activity, not a guess.
               const { name, phase } = data as { messageId: string; name: string; phase: "start" | "end" };
               setActiveTool(phase === "start" ? { messageId: assistantMsgId, name } : null);
+              return;
+            }
+            if (channel === "question") {
+              // The agent called question_ask and is now blocked awaiting the
+              // answer. Render the card optimistically under the (optimistic-id)
+              // assistant row; the post-turn reload() re-keys it to the server id.
+              const { phase, questionId, spec } = data as { phase: "ask" | "keepalive"; questionId: string; spec: QuestionSpec };
+              if (phase === "keepalive") return; // idle timer already reset by touchPending
+              setQuestions((prev) => {
+                const list = prev[assistantMsgId] ?? [];
+                if (list.some((q) => q.id === questionId)) return prev;
+                const q: Question = {
+                  id: questionId, conversation_id: conversationId, asking_message_id: assistantMsgId,
+                  employee_id: employee?.id ?? "", spec, answers: null, status: "pending",
+                  created_at: new Date().toISOString(), resolved_at: null,
+                };
+                return { ...prev, [assistantMsgId]: [...list, q] };
+              });
               return;
             }
             if (channel !== "text") return;
@@ -262,5 +296,27 @@ export function useConversation(
     void command("message.cancel", { messageId: id }, companyId);
   }, [companyId]);
 
-  return { messages, replyCounts, reactions, toggleReaction, send, cancel, sending, activeTool, reload };
+  /** Submit answers to a pending question. Optimistically locks the card, then
+   *  resolves the blocked turn server-side (which continues streaming into the
+   *  same assistant message). Marks it orphaned if no turn was still waiting. */
+  const answerQuestion = useCallback(
+    async (questionId: string, answers: Record<string, SubAnswer>) => {
+      const patch = (fn: (q: Question) => Question) =>
+        setQuestions((prev) => {
+          const next: Record<string, Question[]> = {};
+          for (const [k, list] of Object.entries(prev)) next[k] = list.map((q) => (q.id === questionId ? fn(q) : q));
+          return next;
+        });
+      patch((q) => ({ ...q, status: "answered", answers: { answers, answeredAt: new Date().toISOString() } }));
+      try {
+        const res = await command<{ resolved: boolean }>("question.answer", { questionId, answers }, companyId);
+        if (!res.resolved) patch((q) => ({ ...q, orphaned: true }));
+      } catch (err) {
+        console.error("question.answer failed:", err);
+      }
+    },
+    [companyId],
+  );
+
+  return { messages, replyCounts, reactions, questions, toggleReaction, send, cancel, answerQuestion, sending, activeTool, reload };
 }

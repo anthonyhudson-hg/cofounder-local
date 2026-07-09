@@ -113,6 +113,9 @@ const messageSend: Tool<SendInput, SendOutput> = {
         excludeEmployeeId: tc.employeeId,
         correlationId: tc.correlationId,
         cascadeDepth: depth + 1,
+        // No live client is streaming this cascade — a question_ask here would
+        // block forever with nobody to answer, so the tool degrades instead.
+        interactive: false,
       }).catch((err) => {
         process.stderr.write(
           `[message.send tool] response cascade for conversation ${match.id} failed: ${err instanceof Error ? err.message : String(err)}\n`,

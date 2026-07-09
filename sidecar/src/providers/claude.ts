@@ -2,6 +2,7 @@ import type { query } from "@anthropic-ai/claude-agent-sdk";
 import { AgentProvider, RunTurnOptions, TurnCancelledError, TurnChunk, TurnResult, UsagePayload, ZERO_USAGE } from "./types";
 import { buildMemoryWriteToolDef, MEMORY_WRITE_ALLOWED_TOOL, AGENT_TOOLS_MCP_SERVER_NAME } from "./claudeMemoryTool";
 import { buildMessageSendToolDef, MESSAGE_SEND_ALLOWED_TOOL } from "./claudeMessageSendTool";
+import { buildAskQuestionToolDef, ASK_QUESTION_ALLOWED_TOOL } from "./claudeAskQuestionTool";
 
 /**
  * Claude Code / Claude Agent SDK provider. This is the original Chief of Staff
@@ -69,11 +70,15 @@ export class ClaudeProvider implements AgentProvider {
     // channel-relevance check) run exactly as before, with zero tools.
     const toolOptions = opts.agentTools
       ? {
-          allowedTools: [MEMORY_WRITE_ALLOWED_TOOL, MESSAGE_SEND_ALLOWED_TOOL],
+          allowedTools: [MEMORY_WRITE_ALLOWED_TOOL, MESSAGE_SEND_ALLOWED_TOOL, ASK_QUESTION_ALLOWED_TOOL],
           mcpServers: {
             [AGENT_TOOLS_MCP_SERVER_NAME]: createSdkMcpServer({
               name: AGENT_TOOLS_MCP_SERVER_NAME,
-              tools: [buildMemoryWriteToolDef(tool, opts.agentTools), buildMessageSendToolDef(tool, opts.agentTools)],
+              tools: [
+                buildMemoryWriteToolDef(tool, opts.agentTools),
+                buildMessageSendToolDef(tool, opts.agentTools),
+                buildAskQuestionToolDef(tool, opts.agentTools),
+              ],
             }),
           },
         }

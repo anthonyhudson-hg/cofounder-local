@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { command, commandStreaming, query } from "../lib/runtimeClient";
 import { REACTOR_USER, Reaction } from "../types";
-import { Employee, Message } from "../types";
+import { Employee, Message, type Question, type QuestionSpec, type SubAnswer } from "../types";
 import { ReplyTarget } from "./useConversation";
 import { useStaleGuard } from "./useStaleGuard";
 
@@ -24,6 +24,20 @@ interface PendingSend {
 }
 
 const EPHEMERAL_PREFIX = "ephemeral-";
+
+/** Groups channel question rows by their UI anchor. Channel questions have no
+ *  asking_message_id (a responder has no message row until it posts), so they
+ *  anchor to the responder's ephemeral row by employee. Cancelled ones drop out
+ *  of the chat flow (still visible in the debug view). */
+function groupChannelQuestions(rows: Question[]): Record<string, Question[]> {
+  const grouped: Record<string, Question[]> = {};
+  for (const q of rows) {
+    if (q.status === "cancelled") continue;
+    const key = q.asking_message_id ?? `${EPHEMERAL_PREFIX}${q.employee_id}`;
+    (grouped[key] ??= []).push(q);
+  }
+  return grouped;
+}
 
 /**
  * The runtime now owns the entire channel turn loop — relevance-gating every
@@ -48,6 +62,7 @@ export function useChannel(conversationId: string, companyId: string, onActivity
   const [messages, setMessages] = useState<Message[]>([]);
   const [replyCounts, setReplyCounts] = useState<Record<string, number>>({});
   const [reactions, setReactions] = useState<Record<string, string[]>>({});
+  const [questions, setQuestions] = useState<Record<string, Question[]>>({});
   const [members, setMembers] = useState<Employee[]>([]);
   const [sending, setSending] = useState(false);
   // Tool name each responding member is currently calling, keyed by employeeId
@@ -91,6 +106,7 @@ export function useChannel(conversationId: string, companyId: string, onActivity
     const token = messagesGuard.begin();
     const rows = await query<Message[]>("messages.list", { conversationId }, null);
     const replyCountRows = await query<Record<string, number>>("messages.replyCounts", { conversationId }, null);
+    const questionRows = await query<Question[]>("questions.list", { conversationId }, null);
     if (!messagesGuard.isCurrent(token)) return;
     // Real rows just arrived — preserve any ephemeral placeholders still live
     // (a later, still-in-flight responder in the same batch) rather than
@@ -99,6 +115,7 @@ export function useChannel(conversationId: string, companyId: string, onActivity
     messagesRef.current = [...rows, ...ephemeral];
     setMessages(messagesRef.current);
     setReplyCounts(replyCountRows);
+    setQuestions(groupChannelQuestions(questionRows));
     await reloadReactions();
   }, [conversationId, reloadReactions, messagesGuard]);
 
@@ -178,6 +195,42 @@ export function useChannel(conversationId: string, companyId: string, onActivity
                 if (phase === "start") updated[employeeId] = name;
                 else delete updated[employeeId];
                 return updated;
+              });
+              return;
+            }
+            if (channel === "channelQuestion") {
+              // A responder called question_ask and is blocked awaiting the
+              // answer. Anchor the card to that responder's ephemeral row
+              // (creating one if it hasn't streamed any text yet).
+              const { employeeId, phase, questionId, spec } = data as {
+                employeeId: string;
+                phase: "ask" | "keepalive";
+                questionId: string;
+                spec: QuestionSpec;
+              };
+              if (phase === "keepalive") return; // idle timer already reset by touchPending
+              const ephemeralId = `${EPHEMERAL_PREFIX}${employeeId}`;
+              if (!messagesRef.current.some((m) => m.id === ephemeralId)) {
+                const placeholder: Message = {
+                  id: ephemeralId, conversation_id: conversationId, role: "assistant", content: "",
+                  model: null, effort: null, input_tokens: null, output_tokens: null,
+                  cache_creation_input_tokens: null, cache_read_input_tokens: null, total_cost_usd: null,
+                  status: "streaming", error_message: null, debug_payload: null,
+                  thread_root_id: null, reply_to_message_id: null,
+                  author_employee_id: employeeId, created_at: new Date().toISOString(),
+                };
+                messagesRef.current = [...messagesRef.current, placeholder];
+                setMessages(messagesRef.current);
+              }
+              setQuestions((prev) => {
+                const list = prev[ephemeralId] ?? [];
+                if (list.some((q) => q.id === questionId)) return prev;
+                const q: Question = {
+                  id: questionId, conversation_id: conversationId, asking_message_id: null,
+                  employee_id: employeeId, spec, answers: null, status: "pending",
+                  created_at: new Date().toISOString(), resolved_at: null,
+                };
+                return { ...prev, [ephemeralId]: [...list, q] };
               });
               return;
             }
@@ -271,5 +324,24 @@ export function useChannel(conversationId: string, companyId: string, onActivity
     [conversationId, members, runSend],
   );
 
-  return { messages, replyCounts, reactions, toggleReaction, members, send, sending, activeTools, reload };
+  const answerQuestion = useCallback(
+    async (questionId: string, answers: Record<string, SubAnswer>) => {
+      const patch = (fn: (q: Question) => Question) =>
+        setQuestions((prev) => {
+          const next: Record<string, Question[]> = {};
+          for (const [k, list] of Object.entries(prev)) next[k] = list.map((q) => (q.id === questionId ? fn(q) : q));
+          return next;
+        });
+      patch((q) => ({ ...q, status: "answered", answers: { answers, answeredAt: new Date().toISOString() } }));
+      try {
+        const res = await command<{ resolved: boolean }>("question.answer", { questionId, answers }, companyId);
+        if (!res.resolved) patch((q) => ({ ...q, orphaned: true }));
+      } catch (err) {
+        console.error("question.answer failed:", err);
+      }
+    },
+    [companyId],
+  );
+
+  return { messages, replyCounts, reactions, questions, toggleReaction, members, send, sending, activeTools, answerQuestion, reload };
 }

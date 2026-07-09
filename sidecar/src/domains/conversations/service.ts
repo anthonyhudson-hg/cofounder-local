@@ -13,6 +13,19 @@ import { getUserProfile } from "../settings/service";
 import { registerTurn, unregisterTurn } from "../../runtime/turnRegistry";
 import { createTurnStatus, emitStatus, emitStatusDone, friendlyToolName, statusSnippet } from "../../runtime/agentStatus";
 
+/**
+ * Guidance appended to an agent's system prompt about asking the user
+ * questions. Claude agents get the real `question_ask` tool (a mid-turn
+ * structured question card that blocks for the answer); Codex agents can't
+ * register host tools, so they're told to ask in prose and stop instead.
+ */
+function askUserGuidance(providerName: string): string {
+  if (providerName === "claude") {
+    return "When you're genuinely blocked on a decision only the user can make — a choice between real alternatives, a missing parameter, a preference you shouldn't guess — call the `question_ask` tool to ask up to 4 structured questions and wait for the answer, rather than guessing or burying the question in prose. Reach for it liberally instead of assuming. Don't use it for things you can reasonably decide yourself.";
+  }
+  return "If you're genuinely blocked on a decision only the user can make, ask your clarifying question(s) directly in your reply and then stop and wait for their response — don't guess.";
+}
+
 const VALID_EFFORTS: ReadonlySet<string> = new Set<Effort>(["low", "medium", "high", "xhigh", "max"]);
 /** Clamp a stored (possibly stale or hand-corrupted) effort value to a valid Effort
  *  before it reaches provider-specific effort mapping, rather than casting blindly. */
@@ -438,7 +451,7 @@ export async function sendMessage(
   const agentProfile = await getAgentProfile(ctx, employee.id);
   const baseSystemPrompt = composeSystemPrompt(company.profile, company.system_prompt, identity, employee, responsibilities, agentProfile);
   const mentionScope = `This is a private 1:1 DM between you and ${userFullName || "the founder"}. There is nobody else here to @mention — do not @mention any other employee in this conversation.`;
-  const systemPrompt = `${baseSystemPrompt}\n\n---\n\n${mentionScope}\n\n---\n\nIf the message you're replying to deserves a quick reaction in addition to (or instead of, if you have nothing to add) a full reply, end your response with a line like [[react:👍]] using one relevant emoji. Omit this entirely if no reaction is warranted.`;
+  const systemPrompt = `${baseSystemPrompt}\n\n---\n\n${mentionScope}\n\n---\n\n${askUserGuidance(providerName)}\n\n---\n\nIf the message you're replying to deserves a quick reaction in addition to (or instead of, if you have nothing to add) a full reply, end your response with a line like [[react:👍]] using one relevant emoji. Omit this entirely if no reaction is warranted.`;
 
   // 3. consume reaction notices since this employee's last turn
   const rawNotices = await consumeReactionNotices(ctx, employee.id, userFullName);
@@ -540,7 +553,17 @@ export async function sendMessage(
           systemPrompt,
           prompt: promptWithNotices,
           resumeSessionId,
-          agentTools: { ctx, companyId: input.companyId, employeeId: employee.id, correlationId: input.correlationId ?? null },
+          agentTools: {
+            ctx,
+            companyId: input.companyId,
+            employeeId: employee.id,
+            correlationId: input.correlationId ?? null,
+            conversationId: input.conversationId,
+            askingMessageId: assistantMessageId,
+            sink,
+            abortSignal,
+            interactive: true,
+          },
           abortSignal,
         }),
         onChunk,
@@ -793,6 +816,10 @@ export async function runChannelResponders(
     responderProviderOverride?: AgentProvider;
     /** Cascade depth this batch of responders runs at (see ToolContext.cascadeDepth). */
     cascadeDepth?: number;
+    /** Whether a live user is present to answer a question_ask (see
+     *  ToolContext.interactive). A background message.send cascade passes false.
+     *  Defaults to true. */
+    interactive?: boolean;
   } = {},
 ): Promise<ChannelResponderOutcome[]> {
   const conv = await ctx.db.selectFrom("conversations").where("id", "=", conversationId).select(["name"]).executeTakeFirstOrThrow();
@@ -894,7 +921,7 @@ export async function runChannelResponders(
       const mentionScope = otherMemberNames.length
         ? `You may only @mention people who are members of this channel: ${otherMemberNames.join(", ")}. Do not @mention anyone else — they aren't part of this conversation and won't see it.`
         : `There is nobody else in this channel to @mention right now.`;
-      const systemPrompt = buildChannelSystemPrompt(`${baseSystemPrompt}\n\n---\n\n${mentionScope}`, openThreads, reactionTargets);
+      const systemPrompt = buildChannelSystemPrompt(`${baseSystemPrompt}\n\n---\n\n${mentionScope}\n\n---\n\n${askUserGuidance(providerName)}`, openThreads, reactionTargets);
 
       const rawNotices = await consumeReactionNotices(ctx, member.id, userFullName);
       const { notices, block: noticesBlock } = formatReactionNoticesForPrompt(rawNotices);
@@ -935,7 +962,18 @@ export async function runChannelResponders(
               systemPrompt,
               prompt: promptWithNotices,
               resumeSessionId: resume,
-              agentTools: { ctx, companyId, employeeId: member.id, correlationId: options.correlationId ?? null, cascadeDepth: options.cascadeDepth ?? 0 },
+              agentTools: {
+                ctx,
+                companyId,
+                employeeId: member.id,
+                correlationId: options.correlationId ?? null,
+                cascadeDepth: options.cascadeDepth ?? 0,
+                conversationId,
+                askingMessageId: null,
+                sink,
+                abortSignal,
+                interactive: options.interactive ?? true,
+              },
               abortSignal,
             }),
             onChunk,

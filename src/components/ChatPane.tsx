@@ -127,7 +127,7 @@ function ChannelChatPane({
   onFocusHandled,
 }: Props) {
   const isGroup = !!conversation.is_group;
-  const { messages, replyCounts, reactions, toggleReaction, members, send, sending } = useChannel(
+  const { messages, replyCounts, reactions, questions, toggleReaction, members, send, sending, answerQuestion } = useChannel(
     conversation.id,
     companyId,
     onActivity,
@@ -217,6 +217,8 @@ function ChannelChatPane({
           focusMessageId={mainFocusId}
           activityFor={activityFor}
           pendingActivities={pendingActivities}
+          questions={questions}
+          onAnswerQuestion={answerQuestion}
         />
 
         <Composer
@@ -273,7 +275,7 @@ function DmChatPane({
   focusTarget,
   onFocusHandled,
 }: Props) {
-  const { messages, replyCounts, reactions, toggleReaction, send, cancel, sending } = useConversation(
+  const { messages, replyCounts, reactions, questions, toggleReaction, send, cancel, sending, answerQuestion } = useConversation(
     conversation.id,
     companyId,
     employee,
@@ -358,6 +360,8 @@ function DmChatPane({
           focusMessageId={mainFocusId}
           activityFor={activityFor}
           pendingActivities={pendingActivities}
+          questions={questions}
+          onAnswerQuestion={answerQuestion}
         />
 
         <Composer

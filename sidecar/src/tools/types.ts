@@ -1,4 +1,5 @@
 import type { RuntimeContext } from "../runtime/context";
+import type { DeltaSink } from "../runtime/dispatch";
 
 /**
  * Side-effect classes, ordered least→most dangerous. A tool declares the effect
@@ -33,6 +34,24 @@ export interface ToolContext {
    * forever, burning tokens with no user in the loop. Absent ⇒ 0.
    */
   cascadeDepth?: number;
+  // --- interactive/blocking tools (question_ask) ---
+  /** The conversation this turn belongs to — where a question card renders. */
+  conversationId?: string;
+  /** DM: the streaming assistant message asking. Channel: null (a responder has
+   *  no message row until it posts, so its card keys off employeeId instead). */
+  askingMessageId?: string | null;
+  /** The initiating turn's live delta sink — how a blocking tool draws its card
+   *  and streams keepalives that reset the client's stream-idle timer. */
+  sink?: DeltaSink;
+  /** Fires on user Stop / stale-session retry — a blocking tool must reject its
+   *  wait when this aborts so it doesn't hang forever. */
+  abortSignal?: AbortSignal;
+  /** False for background cascades (message.send responders) that have no live
+   *  user — a question tool degrades gracefully instead of blocking forever. The
+   *  no-op sink used there is an anonymous object, so this flag (not sink
+   *  identity) is the reliable "is there a human here" signal. Absent ⇒ treat as
+   *  non-interactive. */
+  interactive?: boolean;
 }
 
 export interface Tool<Input = unknown, Output = unknown> {

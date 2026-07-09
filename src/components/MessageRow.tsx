@@ -3,12 +3,13 @@ import { memo, useEffect, useRef, useState } from "react";
 import { QUICK_REACTIONS } from "../lib/emoji";
 import { activityStatusText, type LiveActivity } from "../lib/liveActivity";
 import { MentionTarget } from "../lib/mentions";
-import { Message, modelLabel } from "../types";
+import { Message, modelLabel, type Question, type SubAnswer } from "../types";
 import { Avatar } from "./Avatar";
 import { DebugPanel } from "./DebugPanel";
 import { Emoji } from "./Emoji";
 import { EmojiPicker } from "./EmojiPicker";
 import { MarkdownContent } from "./MarkdownContent";
+import { QuestionCard } from "./QuestionCard";
 
 /** Re-renders every second while `active` so the "N ago" line stays live without
  *  the server having to stream a status per second (Paperclip's useLiveElapsed). */
@@ -101,6 +102,12 @@ interface Props {
   /** Live "what is this agent doing right now" status for this message, while its
    *  turn is in flight — server-authored, see store/agentStatus.ts. */
   activity?: LiveActivity;
+  /** Structured questions this agent asked, anchored to this message (see the
+   *  question_ask tool). A shared empty-array sentinel keeps unchanged rows
+   *  referentially stable under React.memo. */
+  questions?: Question[];
+  /** Stable, id-taking callback to submit an answer (memo-safe, from the hook). */
+  onAnswerQuestion?: (questionId: string, answers: Record<string, SubAnswer>) => void;
 }
 
 function formatTime(iso: string): string {
@@ -138,6 +145,8 @@ function MessageRowImpl({
   replyAuthorName,
   replySnippet,
   activity,
+  questions,
+  onAnswerQuestion,
 }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -186,6 +195,13 @@ function MessageRowImpl({
           {m.status === "pending" && <span className="message-queued">Queued…</span>}
           {m.status === "error" && <div className="message-error">Error: {m.error_message}</div>}
         </div>
+        {questions && questions.length > 0 && onAnswerQuestion && (
+          <div className="question-cards">
+            {questions.map((q) => (
+              <QuestionCard key={q.id} question={q} employeeName={displayName} onAnswer={onAnswerQuestion} />
+            ))}
+          </div>
+        )}
         {usage && <div className="message-usage">{usage}</div>}
         {reactionCounts.size > 0 && (
           <div className="reaction-badges">
@@ -202,7 +218,7 @@ function MessageRowImpl({
             {replyCount} {replyCount === 1 ? "reply" : "replies"} <CaretRight />
           </button>
         )}
-        {showDebug && m.role === "assistant" && <DebugPanel message={m} />}
+        {showDebug && m.role === "assistant" && <DebugPanel message={m} questions={questions} />}
       </div>
 
       <div className="hover-toolbar">
