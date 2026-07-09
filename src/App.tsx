@@ -13,6 +13,8 @@ import { OnboardingModal } from "./components/OnboardingModal";
 import { OnboardingWizard } from "./components/OnboardingWizard";
 import { ProviderSetupGate } from "./components/ProviderSetupGate";
 import { OrgChartView } from "./components/OrgChartView";
+import { ProjectsView } from "./components/ProjectsView";
+import { TasksView } from "./components/TasksView";
 import { GlobalSearch } from "./components/GlobalSearch";
 import { Sidebar } from "./components/Sidebar";
 import { TitleBar } from "./components/TitleBar";
@@ -405,6 +407,10 @@ export default function App() {
           employeesById={employeesById}
         />
       )}
+
+      {view === "projects" && <ProjectsView companyId={companyId} />}
+
+      {view === "tasks" && <TasksView companyId={companyId} employeesById={employeesById} />}
 
       {view === "orgchart" && (
         <OrgChartView

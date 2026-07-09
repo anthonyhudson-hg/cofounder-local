@@ -1,7 +1,7 @@
-import { ChatsCircle, House, TreeStructure } from "@phosphor-icons/react";
+import { ChatsCircle, FolderSimple, House, ListChecks, TreeStructure } from "@phosphor-icons/react";
 import { ReactNode } from "react";
 
-export type RailView = "home" | "chats" | "orgchart";
+export type RailView = "home" | "chats" | "projects" | "tasks" | "orgchart";
 
 interface Props {
   view: RailView;
@@ -30,6 +30,24 @@ export function IconRail({ view, onSelectView, header }: Props) {
       >
         <ChatsCircle className="icon-rail-glyph" weight={view === "chats" ? "fill" : "regular"} size={22} />
         <span className="icon-rail-label">Chats</span>
+      </button>
+      <button
+        className={`icon-rail-btn ${view === "projects" ? "active" : ""}`}
+        title="Projects"
+        aria-current={view === "projects" ? "page" : undefined}
+        onClick={() => onSelectView("projects")}
+      >
+        <FolderSimple className="icon-rail-glyph" weight={view === "projects" ? "fill" : "regular"} size={22} />
+        <span className="icon-rail-label">Projects</span>
+      </button>
+      <button
+        className={`icon-rail-btn ${view === "tasks" ? "active" : ""}`}
+        title="Tasks"
+        aria-current={view === "tasks" ? "page" : undefined}
+        onClick={() => onSelectView("tasks")}
+      >
+        <ListChecks className="icon-rail-glyph" weight={view === "tasks" ? "fill" : "regular"} size={22} />
+        <span className="icon-rail-label">Tasks</span>
       </button>
       <button
         className={`icon-rail-btn ${view === "orgchart" ? "active" : ""}`}

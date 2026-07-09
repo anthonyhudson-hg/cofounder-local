@@ -988,6 +988,149 @@ body {
   font-size: 1.15rem;
 }
 
+/* ---------- Tasks / Projects pages ---------- */
+
+.tasks-view {
+  flex: 1;
+  height: 100%;
+  overflow-y: auto;
+  background: #fff;
+}
+.tasks-view-inner {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 40px 28px;
+}
+.tasks-view-head {
+  margin-bottom: 16px;
+}
+.tasks-view-head .home-view-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.tasks-filter-tabs {
+  display: flex;
+  gap: 6px;
+  margin: 16px 0 12px;
+  border-bottom: 1px solid #ececec;
+}
+.tasks-filter-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 6px 10px;
+  font-size: 0.86rem;
+  color: #6a6a6a;
+  cursor: pointer;
+}
+.tasks-filter-tab.active {
+  color: var(--accent-active, #5b52e0);
+  border-bottom-color: var(--accent-active, #5b52e0);
+  font-weight: 600;
+}
+.tasks-filter-count {
+  font-size: 0.68rem;
+  background: #efefef;
+  color: #6a6a6a;
+  border-radius: 999px;
+  padding: 0 6px;
+  min-width: 16px;
+  text-align: center;
+}
+
+.tasks-view-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tasks-view-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid #e2e0e2;
+  border-radius: 10px;
+  background: #fafafa;
+}
+.tasks-view-item-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.tasks-view-item-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+.tasks-view-item-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 0.78rem;
+  color: #8a8a8a;
+}
+.tasks-view-assignee {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #4a4a4a;
+}
+.tasks-view-avatar {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+}
+.tasks-view-when {
+  color: #a0a0a0;
+}
+.task-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.projects-add-card {
+  margin: 6px 0 18px;
+}
+.projects-add-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.projects-add-row input {
+  flex: 1;
+  min-width: 160px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .tasks-view {
+    background: #191b1d;
+  }
+  .tasks-filter-tabs {
+    border-bottom-color: #33373b;
+  }
+  .tasks-filter-count {
+    background: #2a2e31;
+    color: #9a9a9a;
+  }
+  .tasks-view-item {
+    background: #1c1f22;
+    border-color: #3a3d41;
+  }
+  .tasks-view-assignee {
+    color: #c8c8c8;
+  }
+}
+
 .home-pref-row {
   display: flex;
   align-items: center;

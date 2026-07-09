@@ -6,7 +6,6 @@ import { usePhotoUpload } from "../hooks/usePhotoUpload";
 import { useUpdateChecker } from "../hooks/useUpdateChecker";
 import { Company } from "../types";
 import { THEMES, applyTheme, themeForColor } from "../lib/themes";
-import { ProjectsSection } from "./ProjectsSection";
 
 interface Props {
   company: Company;
@@ -174,8 +173,6 @@ export function AppSettingsModal({ company, onUpdateField, canDelete, onDelete, 
             </button>
             {savedFlash && <span className="settings-saved-flash">Saved</span>}
           </div>
-
-          <ProjectsSection companyId={company.id} />
 
           <div className="debug-field">
             <div className="debug-label">Software update</div>
