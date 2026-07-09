@@ -285,4 +285,71 @@ export const MIGRATIONS: Migration[] = [
     // processor that actually consumes it.
     sql: `DROP TABLE IF EXISTS event_outbox;`,
   },
+  {
+    name: "0009_projects_tasks",
+    // Project sandboxing: a company has many projects (each a codebase on disk);
+    // employees are scoped to projects; tasks key a git worktree+branch+PR.
+    sql: `
+      CREATE TABLE projects (
+          id TEXT PRIMARY KEY,
+          company_id TEXT NOT NULL REFERENCES companies(id),
+          name TEXT NOT NULL,
+          root_path TEXT NOT NULL,
+          remote_url TEXT,
+          default_branch TEXT NOT NULL DEFAULT 'main',
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(company_id, name)
+      );
+      CREATE INDEX idx_projects_company ON projects(company_id);
+
+      CREATE TABLE employee_projects (
+          employee_id TEXT NOT NULL REFERENCES employees(id),
+          project_id TEXT NOT NULL REFERENCES projects(id),
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY (employee_id, project_id)
+      );
+      CREATE INDEX idx_employee_projects_project ON employee_projects(project_id);
+
+      CREATE TABLE tasks (
+          id TEXT PRIMARY KEY,
+          company_id TEXT NOT NULL REFERENCES companies(id),
+          project_id TEXT NOT NULL REFERENCES projects(id),
+          employee_id TEXT REFERENCES employees(id),
+          title TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','in_progress','in_review','done','abandoned')),
+          base_branch TEXT NOT NULL DEFAULT 'main',
+          branch_name TEXT,
+          worktree_path TEXT,
+          pr_url TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX idx_tasks_project ON tasks(project_id, status);
+    `,
+  },
+  {
+    name: "0010_questions",
+    // Structured questions an agent asks the user mid-turn (the question_ask
+    // tool). The agent blocks on the SDK's own await until the user answers, so
+    // this row is the durable record backing the in-chat question card and the
+    // debug view. `asking_message_id` is the DM assistant message that's asking;
+    // NULL for a channel responder (which has no message row until it posts).
+    sql: `
+      CREATE TABLE questions (
+          id TEXT PRIMARY KEY,
+          company_id TEXT NOT NULL REFERENCES companies(id),
+          conversation_id TEXT NOT NULL REFERENCES conversations(id),
+          asking_message_id TEXT REFERENCES messages(id),
+          employee_id TEXT NOT NULL REFERENCES employees(id),
+          spec TEXT NOT NULL,
+          answers TEXT,
+          status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','answered','cancelled')),
+          correlation_id TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          resolved_at TEXT
+      );
+      CREATE INDEX idx_questions_conversation ON questions(conversation_id, created_at);
+      CREATE INDEX idx_questions_pending ON questions(status) WHERE status = 'pending';
+    `,
+  },
 ];

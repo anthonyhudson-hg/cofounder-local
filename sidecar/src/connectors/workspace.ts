@@ -17,17 +17,26 @@ export function companyWorkspaceRoot(companyId: string): string {
 }
 
 /**
- * Resolves `requested` against the company's workspace root and throws if it would
- * escape it — absolute paths outside the root, `..` traversal, etc. `requested` may be
- * relative (interpreted relative to the workspace root) or absolute (must itself land
- * inside the root).
+ * Resolves `requested` against `root` and throws if it would escape it — absolute
+ * paths outside the root, `..` traversal, etc. `requested` may be relative
+ * (interpreted relative to `root`) or absolute (must itself land inside `root`).
+ * This is the core path-confinement used for both the company workspace and a
+ * project's worktree.
  */
-export function resolveWithinWorkspace(companyId: string, requested: string): string {
-  const root = companyWorkspaceRoot(companyId);
+export function resolveWithinRoot(root: string, requested: string, label = root): string {
   const candidate = path.resolve(root, requested);
   const rel = path.relative(root, candidate);
   if (rel !== "" && (rel.startsWith("..") || path.isAbsolute(rel))) {
-    throw new Error(`path "${requested}" escapes the company workspace`);
+    throw new Error(`path "${requested}" escapes ${label}`);
   }
   return candidate;
+}
+
+export function resolveWithinWorkspace(companyId: string, requested: string): string {
+  return resolveWithinRoot(companyWorkspaceRoot(companyId), requested, "the company workspace");
+}
+
+/** Where a task's isolated git worktree is checked out (under the company workspace). */
+export function taskWorktreePath(companyId: string, taskId: string): string {
+  return path.join(companyWorkspaceRoot(companyId), "worktrees", taskId);
 }

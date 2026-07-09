@@ -1869,6 +1869,104 @@ body {
   resize: vertical;
 }
 
+/* ---------- Projects ---------- */
+
+.project-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+.project-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid #e2e0e2;
+  border-radius: 8px;
+  background: #fafafa;
+}
+
+.project-row-main {
+  min-width: 0;
+  flex: 1;
+}
+
+.project-row-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.project-badge {
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid;
+}
+
+.project-badge.remote {
+  background: #dbeafe;
+  color: #1d4ed8;
+  border-color: #2563eb;
+}
+
+.project-badge.local {
+  background: #f5f3f0;
+  color: #52585d;
+  border-color: #a8aeb2;
+}
+
+.project-branch {
+  font-size: 0.72rem;
+  color: #8a8a8a;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.project-row-path {
+  font-size: 0.76rem;
+  color: #8a8a8a;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.project-add input {
+  flex: 1;
+  min-width: 160px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .project-row {
+    background: #1c1f22;
+    border-color: #3a3d41;
+  }
+  .project-badge.remote {
+    background: #2563eb2e;
+    color: #6ea8fe;
+    border-color: #2563eb73;
+  }
+  .project-badge.local {
+    background: #6e696024;
+    color: #9a958a;
+    border-color: #9e958a73;
+  }
+}
+
 /* ---------- Inline debug panel ---------- */
 
 .debug-inline {

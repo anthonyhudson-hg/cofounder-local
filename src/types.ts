@@ -24,6 +24,35 @@ export interface Conversation {
   created_at: string;
 }
 
+/** A codebase an agent can work in — one root dir on disk. `remote_url` null = local-only. */
+export interface Project {
+  id: string;
+  company_id: string;
+  name: string;
+  root_path: string;
+  remote_url: string | null;
+  default_branch: string;
+  created_at: string;
+}
+
+export type TaskStatus = "open" | "in_progress" | "in_review" | "done" | "abandoned";
+
+/** A unit of work in a project — keys a git worktree + branch + PR. */
+export interface Task {
+  id: string;
+  company_id: string;
+  project_id: string;
+  employee_id: string | null;
+  title: string;
+  status: TaskStatus;
+  base_branch: string;
+  branch_name: string | null;
+  worktree_path: string | null;
+  pr_url: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export type MessageRole = "user" | "assistant";
 export type MessageStatus = "pending" | "streaming" | "complete" | "error";
 

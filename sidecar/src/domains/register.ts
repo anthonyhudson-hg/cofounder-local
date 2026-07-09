@@ -64,6 +64,14 @@ import {
   baselineNotifications,
   drainNotifications,
 } from "./settings/service";
+import {
+  createProject,
+  listProjects,
+  removeProject,
+  setEmployeeProjects,
+  listEmployeeProjectIds,
+} from "./projects/service";
+import { createTask, listTasks, setTaskStatus, type TaskStatus } from "./tasks/service";
 import type { CommandEnvelope as CE } from "@shared/protocol";
 import type { ToolContext } from "../tools/types";
 
@@ -188,6 +196,42 @@ register("query:search.global", async (ctx, inbound) => {
 });
 register("query:providers.health", async () => checkProviderHealth());
 register("command:providers.reconcile", async (ctx) => reconcileEmployeeModels(ctx));
+
+// ---- projects & tasks (sandboxing) ----
+register("query:projects.list", async (ctx, inbound) => listProjects(ctx, requireCompany(inbound)));
+register("command:project.create", async (ctx, inbound) => {
+  const { name, rootPath } = p<{ name: string; rootPath: string }>(inbound);
+  return createProject(ctx, requireCompany(inbound), { name, rootPath });
+});
+register("command:project.remove", async (ctx, inbound) => {
+  const { projectId } = p<{ projectId: string }>(inbound);
+  await removeProject(ctx, requireCompany(inbound), projectId);
+  return { ok: true };
+});
+register("query:employee.projects", async (ctx, inbound) =>
+  listEmployeeProjectIds(ctx, p<{ employeeId: string }>(inbound).employeeId),
+);
+register("command:employee.setProjects", async (ctx, inbound) => {
+  const { employeeId, projectIds } = p<{ employeeId: string; projectIds: string[] }>(inbound);
+  if (!Array.isArray(projectIds) || projectIds.some((id) => typeof id !== "string")) {
+    throw new Error("employee.setProjects: projectIds must be an array of ids");
+  }
+  await setEmployeeProjects(ctx, requireCompany(inbound), employeeId, projectIds);
+  return { ok: true };
+});
+register("query:tasks.list", async (ctx, inbound) => {
+  const { projectId, employeeId, status } = p<{ projectId?: string; employeeId?: string; status?: TaskStatus }>(inbound);
+  return listTasks(ctx, requireCompany(inbound), { projectId, employeeId, status });
+});
+register("command:task.create", async (ctx, inbound) => {
+  const { projectId, employeeId, title } = p<{ projectId: string; employeeId?: string | null; title: string }>(inbound);
+  return createTask(ctx, { companyId: requireCompany(inbound), projectId, employeeId: employeeId ?? null, title });
+});
+register("command:task.setStatus", async (ctx, inbound) => {
+  const { taskId, status, prUrl } = p<{ taskId: string; status: TaskStatus; prUrl?: string | null }>(inbound);
+  await setTaskStatus(ctx, taskId, status, { prUrl });
+  return { ok: true };
+});
 register("query:userProfile.get", async (ctx) => getUserProfile(ctx));
 register("query:notifications.pref", async (ctx) => getNotificationPreference(ctx));
 

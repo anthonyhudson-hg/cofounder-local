@@ -1,4 +1,4 @@
-import { Camera, CaretRight, Check, DiceFive, Hash, Plus, X } from "@phosphor-icons/react";
+import { Camera, CaretRight, Check, DiceFive, FolderSimple, Hash, Plus, X } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { descendantIds } from "../lib/orgChart";
 import { buildIdentityBlock, composeSystemPrompt, resolveManagerName } from "../lib/promptBuilder";
@@ -22,8 +22,10 @@ import { useCapabilities } from "../hooks/useCapabilities";
 import { useChannelMembership } from "../hooks/useChannelMembership";
 import { ModelEffortSelector } from "./ModelEffortSelector";
 import { useDepartments } from "../hooks/useDepartments";
+import { useEmployeeProjects } from "../hooks/useEmployeeProjects";
 import { useEscapeToClose } from "../hooks/useEscapeToClose";
 import { usePhotoUpload } from "../hooks/usePhotoUpload";
+import { useProjects } from "../hooks/useProjects";
 import { useResizableWidth } from "../hooks/useResizableWidth";
 import { useResponsibilities } from "../hooks/useResponsibilities";
 import { useTokenCount } from "../hooks/useTokenCount";
@@ -109,6 +111,8 @@ export function EmployeeSettingsPanel({
   onClose,
 }: Props) {
   const { memberOf, toggle: toggleChannel } = useChannelMembership(employee.id);
+  const { projects } = useProjects(companyId);
+  const { projectIds, toggle: toggleProject } = useEmployeeProjects(companyId, employee.id);
   const { departments, create: createDepartment } = useDepartments(companyId);
   const { width, onMouseDown } = useResizableWidth(320, 280, 560, "left");
   const [name, setName] = useState(conversation.name);
@@ -428,6 +432,40 @@ export function EmployeeSettingsPanel({
             Only channels this employee is a member of will see their messages — and only members are asked
             whether to respond.
           </span>
+        </div>
+
+        <div className="settings-section">
+          <div className="settings-section-title">Projects</div>
+          {projects.length === 0 ? (
+            <span className="settings-hint">
+              No projects yet. Add codebases in Company settings → Projects, then scope this employee to the ones it should
+              be able to work in.
+            </span>
+          ) : (
+            <>
+              <div className="channel-chip-list">
+                {projects.map((p) => {
+                  const active = projectIds.includes(p.id);
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      className={`channel-chip ${active ? "active" : ""}`}
+                      onClick={() => toggleProject(p.id)}
+                    >
+                      {active && <Check size={12} weight="bold" />}
+                      <FolderSimple size={12} weight="bold" />
+                      {p.name}
+                    </button>
+                  );
+                })}
+              </div>
+              <span className="settings-hint">
+                This employee can only read/edit code in the projects checked here. It picks the right one from context and
+                asks if it's unclear.
+              </span>
+            </>
+          )}
         </div>
 
         <div className="settings-section">

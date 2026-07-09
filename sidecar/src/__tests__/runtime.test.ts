@@ -1259,6 +1259,53 @@ test("sendMessage (DM): broadcasts live agent status through the turn (thinking 
   await ctx.db.destroy();
 });
 
+test("projects + tasks: register a repo, scope an employee, materialize an isolated worktree+branch, tear it down", async () => {
+  const { createProject, listProjects, setEmployeeProjects, listEmployeeProjectIds, listProjectsForEmployee } = await import("../domains/projects/service");
+  const { createTask, startTask, cleanupTaskWorktree, getTask } = await import("../domains/tasks/service");
+  const { runGit } = await import("../connectors/git");
+  const ctx = freshCtx();
+  const { id: companyId } = await createCompany(ctx, { name: "Acme" }, { kind: "user" });
+  const cos = await ctx.db.selectFrom("employees").where("company_id", "=", companyId).select("id").executeTakeFirstOrThrow();
+
+  // A real throwaway repo with one commit, so a worktree can branch off it.
+  const repo = path.join(os.tmpdir(), `cf-repo-${randomUUID()}`);
+  fs.mkdirSync(repo, { recursive: true });
+  await runGit(repo, ["init", "-q"]);
+  await runGit(repo, ["config", "user.email", "t@t.dev"]);
+  await runGit(repo, ["config", "user.name", "Test"]);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello");
+  await runGit(repo, ["add", "-A"]);
+  await runGit(repo, ["commit", "-q", "-m", "init"]);
+
+  const project = await createProject(ctx, companyId, { name: "app", rootPath: repo });
+  assert.equal(project.name, "app");
+  assert.equal(project.remote_url, null, "local-only repo has no remote");
+  assert.ok(project.default_branch, "captured a default branch");
+  assert.ok((await listProjects(ctx, companyId)).some((pr) => pr.id === project.id));
+
+  await setEmployeeProjects(ctx, companyId, cos.id, [project.id]);
+  assert.deepEqual(await listEmployeeProjectIds(ctx, cos.id), [project.id]);
+  assert.ok((await listProjectsForEmployee(ctx, cos.id)).some((pr) => pr.id === project.id));
+
+  const task = await createTask(ctx, { companyId, projectId: project.id, employeeId: cos.id, title: "Add a thing" });
+  assert.equal(task.status, "open");
+
+  const { worktreePath, branchName } = await startTask(ctx, task.id);
+  assert.ok(fs.existsSync(worktreePath), "worktree checked out on disk");
+  assert.match(branchName, /^cofounder\/add-a-thing-/, "branch is named from the task title");
+  assert.ok((await runGit(repo, ["branch", "--list", branchName])).includes(branchName), "branch created off the base");
+  const started = await getTask(ctx, task.id);
+  assert.equal(started!.status, "in_progress");
+  assert.equal(started!.worktree_path, worktreePath);
+
+  await cleanupTaskWorktree(ctx, task.id);
+  assert.ok(!fs.existsSync(worktreePath), "worktree removed on cleanup");
+
+  await runGit(repo, ["worktree", "prune"]).catch(() => {});
+  fs.rmSync(repo, { recursive: true, force: true });
+  await ctx.db.destroy();
+});
+
 // keep tmp dir from filling forever in CI
 test.after?.(() => {
   try {

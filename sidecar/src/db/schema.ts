@@ -188,6 +188,61 @@ export interface AgentMemoryTable {
   updated_at: Generated<string>;
 }
 
+/** A codebase (or working context) an agent can operate on. One root dir on disk;
+ *  `remote_url` null = local-only repo (branch-only flow, no PR). */
+export interface ProjectsTable {
+  id: string;
+  company_id: string;
+  name: string;
+  root_path: string;
+  remote_url: string | null;
+  default_branch: Generated<string>;
+  created_at: Generated<string>;
+}
+
+/** Which projects an employee is scoped to (set in employee settings). */
+export interface EmployeeProjectsTable {
+  employee_id: string;
+  project_id: string;
+  created_at: Generated<string>;
+}
+
+/** A unit of work an agent does in a project — the thing a git worktree + branch
+ *  + PR keys to. Minimal foundation; richer task management is a later concern. */
+export interface TasksTable {
+  id: string;
+  company_id: string;
+  project_id: string;
+  employee_id: string | null;
+  title: string;
+  status: Generated<"open" | "in_progress" | "in_review" | "done" | "abandoned">;
+  base_branch: Generated<string>;
+  branch_name: string | null;
+  worktree_path: string | null;
+  pr_url: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+/** A structured question an agent asked the user mid-turn via the question_ask
+ *  tool. `spec`/`answers` are JSON (QuestionSpec / AnswerPayload). Pending until
+ *  the user answers (which resolves the blocked tool handler) or the turn is
+ *  cancelled. `asking_message_id` is the DM assistant message asking; NULL for a
+ *  channel responder (no message row until it posts). */
+export interface QuestionsTable {
+  id: string;
+  company_id: string;
+  conversation_id: string;
+  asking_message_id: string | null;
+  employee_id: string;
+  spec: string;
+  answers: string | null;
+  status: Generated<"pending" | "answered" | "cancelled">;
+  correlation_id: string | null;
+  created_at: Generated<string>;
+  resolved_at: string | null;
+}
+
 /** Tracks which runtime migrations have been applied (owned by the runtime). */
 export interface SchemaMigrationsTable {
   name: string;
@@ -212,5 +267,9 @@ export interface Database {
   approvals: ApprovalsTable;
   agent_profiles: AgentProfilesTable;
   agent_memory: AgentMemoryTable;
+  projects: ProjectsTable;
+  employee_projects: EmployeeProjectsTable;
+  tasks: TasksTable;
+  questions: QuestionsTable;
   schema_migrations: SchemaMigrationsTable;
 }
