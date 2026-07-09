@@ -25,3 +25,5 @@ dist-ssr
 
 /paperclip_ai_source/
 /persona_examples/
+# Local screenshots dropped into the repo root
+/Screenshot*.png
