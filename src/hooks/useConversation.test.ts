@@ -42,6 +42,7 @@ function mockEmptyQueries() {
     if (type === "messages.replyCounts") return {};
     if (type === "reactions.list") return [];
     if (type === "questions.list") return [];
+    if (type === "approvals.list") return [];
     throw new Error(`unexpected query in test: ${type}`);
   });
 }

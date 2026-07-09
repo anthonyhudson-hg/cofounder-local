@@ -127,7 +127,7 @@ function ChannelChatPane({
   onFocusHandled,
 }: Props) {
   const isGroup = !!conversation.is_group;
-  const { messages, replyCounts, reactions, questions, toggleReaction, members, send, sending, answerQuestion } = useChannel(
+  const { messages, replyCounts, reactions, questions, approvals, toggleReaction, members, send, sending, answerQuestion, resolveApproval } = useChannel(
     conversation.id,
     companyId,
     onActivity,
@@ -219,6 +219,9 @@ function ChannelChatPane({
           pendingActivities={pendingActivities}
           questions={questions}
           onAnswerQuestion={answerQuestion}
+          approvals={approvals}
+          onResolveApproval={resolveApproval}
+          approvalScopeLabel={isGroup ? conversation.name : `#${conversation.name}`}
         />
 
         <Composer
@@ -275,7 +278,7 @@ function DmChatPane({
   focusTarget,
   onFocusHandled,
 }: Props) {
-  const { messages, replyCounts, reactions, questions, toggleReaction, send, cancel, sending, answerQuestion } = useConversation(
+  const { messages, replyCounts, reactions, questions, approvals, toggleReaction, send, cancel, sending, answerQuestion, resolveApproval } = useConversation(
     conversation.id,
     companyId,
     employee,
@@ -362,6 +365,9 @@ function DmChatPane({
           pendingActivities={pendingActivities}
           questions={questions}
           onAnswerQuestion={answerQuestion}
+          approvals={approvals}
+          onResolveApproval={resolveApproval}
+          approvalScopeLabel="this DM"
         />
 
         <Composer

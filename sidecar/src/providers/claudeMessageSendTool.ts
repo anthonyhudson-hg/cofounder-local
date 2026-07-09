@@ -1,8 +1,8 @@
 import { z } from "zod";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { tool as ToolFn } from "@anthropic-ai/claude-agent-sdk";
-import { invokeTool } from "../tools/registry";
 import type { ToolContext } from "../tools/types";
+import { runGatedToolInteractive } from "./interactiveApproval";
 import { AGENT_TOOLS_MCP_SERVER_NAME } from "./claudeMemoryTool";
 
 export const MESSAGE_SEND_MCP_TOOL_NAME = "message_send";
@@ -27,20 +27,9 @@ export function buildMessageSendToolDef(toolFn: typeof ToolFn, tc: ToolContext) 
     },
     async (args): Promise<CallToolResult> => {
       try {
-        const result = await invokeTool(tc, "message.send", args);
-        if (result.status === "approval") {
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text",
-                text: `This post requires a human's approval and has been queued (approval id ${result.approvalId}). It has NOT been posted yet — tell the user it's pending review rather than assuming it went out.`,
-              },
-            ],
-          };
-        }
-        const output = result.output as { conversationName: string };
-        return { content: [{ type: "text", text: `Posted to #${output.conversationName}.` }] };
+        return await runGatedToolInteractive(tc, "message.send", args, (output) => ({
+          content: [{ type: "text", text: `Posted to #${(output as { conversationName: string }).conversationName}.` }],
+        }));
       } catch (err) {
         return {
           isError: true,

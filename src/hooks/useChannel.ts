@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { command, commandStreaming, query } from "../lib/runtimeClient";
 import { REACTOR_USER, Reaction } from "../types";
-import { Employee, Message, type Question, type QuestionSpec, type SubAnswer } from "../types";
+import { Employee, Message, type Approval, type ApprovalDecision, type Question, type QuestionSpec, type SubAnswer } from "../types";
 import { ReplyTarget } from "./useConversation";
 import { useStaleGuard } from "./useStaleGuard";
 
@@ -39,6 +39,18 @@ function groupChannelQuestions(rows: Question[]): Record<string, Question[]> {
   return grouped;
 }
 
+/** Pending approvals anchored to the responder's ephemeral row (channel
+ *  approvals have no asking_message_id — the responder has no message row yet). */
+function groupChannelApprovals(rows: Approval[]): Record<string, Approval[]> {
+  const grouped: Record<string, Approval[]> = {};
+  for (const a of rows) {
+    const key = a.askingMessageId ?? (a.employeeId ? `${EPHEMERAL_PREFIX}${a.employeeId}` : null);
+    if (!key) continue;
+    (grouped[key] ??= []).push(a);
+  }
+  return grouped;
+}
+
 /**
  * The runtime now owns the entire channel turn loop — relevance-gating every
  * member, running each responder in parallel, and parsing each one's
@@ -63,6 +75,7 @@ export function useChannel(conversationId: string, companyId: string, onActivity
   const [replyCounts, setReplyCounts] = useState<Record<string, number>>({});
   const [reactions, setReactions] = useState<Record<string, string[]>>({});
   const [questions, setQuestions] = useState<Record<string, Question[]>>({});
+  const [approvals, setApprovals] = useState<Record<string, Approval[]>>({});
   const [members, setMembers] = useState<Employee[]>([]);
   const [sending, setSending] = useState(false);
   // Tool name each responding member is currently calling, keyed by employeeId
@@ -107,6 +120,7 @@ export function useChannel(conversationId: string, companyId: string, onActivity
     const rows = await query<Message[]>("messages.list", { conversationId }, null);
     const replyCountRows = await query<Record<string, number>>("messages.replyCounts", { conversationId }, null);
     const questionRows = await query<Question[]>("questions.list", { conversationId }, null);
+    const approvalRows = await query<Approval[]>("approvals.list", { status: "pending", conversationId }, companyId);
     if (!messagesGuard.isCurrent(token)) return;
     // Real rows just arrived — preserve any ephemeral placeholders still live
     // (a later, still-in-flight responder in the same batch) rather than
@@ -116,8 +130,9 @@ export function useChannel(conversationId: string, companyId: string, onActivity
     setMessages(messagesRef.current);
     setReplyCounts(replyCountRows);
     setQuestions(groupChannelQuestions(questionRows));
+    setApprovals(groupChannelApprovals(approvalRows));
     await reloadReactions();
-  }, [conversationId, reloadReactions, messagesGuard]);
+  }, [conversationId, companyId, reloadReactions, messagesGuard]);
 
   // Calling the memoized `reload` directly from inside the doubly-nested
   // onDelta callback below (itself nested inside runSend) made the React
@@ -234,6 +249,35 @@ export function useChannel(conversationId: string, companyId: string, onActivity
               });
               return;
             }
+            if (channel === "channelApproval") {
+              const { employeeId, phase, approvalId, action, detail, scope } = data as {
+                employeeId: string; phase: "ask" | "keepalive"; approvalId: string; action: string; detail: unknown; scope: string | null;
+              };
+              if (phase === "keepalive") return;
+              const ephemeralId = `${EPHEMERAL_PREFIX}${employeeId}`;
+              if (!messagesRef.current.some((m) => m.id === ephemeralId)) {
+                const placeholder: Message = {
+                  id: ephemeralId, conversation_id: conversationId, role: "assistant", content: "",
+                  model: null, effort: null, input_tokens: null, output_tokens: null,
+                  cache_creation_input_tokens: null, cache_read_input_tokens: null, total_cost_usd: null,
+                  status: "streaming", error_message: null, debug_payload: null,
+                  thread_root_id: null, reply_to_message_id: null,
+                  author_employee_id: employeeId, created_at: new Date().toISOString(),
+                };
+                messagesRef.current = [...messagesRef.current, placeholder];
+                setMessages(messagesRef.current);
+              }
+              setApprovals((prev) => {
+                const list = prev[ephemeralId] ?? [];
+                if (list.some((a) => a.id === approvalId)) return prev;
+                const a: Approval = {
+                  id: approvalId, employeeId, conversationId, askingMessageId: null,
+                  action, detail, scope, status: "pending", requestedAt: new Date().toISOString(),
+                };
+                return { ...prev, [ephemeralId]: [...list, a] };
+              });
+              return;
+            }
             if (channel === "channelDone") {
               const { employeeId } = data as { employeeId: string };
               const ephemeralId = `${EPHEMERAL_PREFIX}${employeeId}`;
@@ -343,5 +387,24 @@ export function useChannel(conversationId: string, companyId: string, onActivity
     [companyId],
   );
 
-  return { messages, replyCounts, reactions, questions, toggleReaction, members, send, sending, activeTools, answerQuestion, reload };
+  const resolveApproval = useCallback(
+    async (approvalId: string, decision: ApprovalDecision) => {
+      const patch = (fn: (a: Approval) => Approval) =>
+        setApprovals((prev) => {
+          const next: Record<string, Approval[]> = {};
+          for (const [k, list] of Object.entries(prev)) next[k] = list.map((a) => (a.id === approvalId ? fn(a) : a));
+          return next;
+        });
+      patch((a) => ({ ...a, status: decision === "denied" ? "denied" : "approved" }));
+      try {
+        const res = await command<{ executed: boolean; live?: boolean }>("approval.resolve", { approvalId, decision }, companyId);
+        if (decision !== "denied" && !res.live) patch((a) => ({ ...a, orphaned: true }));
+      } catch (err) {
+        console.error("approval.resolve failed:", err);
+      }
+    },
+    [companyId],
+  );
+
+  return { messages, replyCounts, reactions, questions, approvals, toggleReaction, members, send, sending, activeTools, answerQuestion, resolveApproval, reload };
 }

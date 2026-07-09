@@ -47,7 +47,10 @@ export function listScopes(): CapabilityScope[] {
 
 export type InvokeResult =
   | { status: "ok"; output: unknown }
-  | { status: "approval"; approvalId: string };
+  // `detail` is the input merged with describeForApproval's preview; `scope`/`effect`
+  // let an interactive caller render the approval card and grant the right scope on
+  // "Allow always" without re-looking-up the tool.
+  | { status: "approval"; approvalId: string; detail: unknown; scope: string; effect: Effect };
 
 /**
  * Invokes a tool THROUGH the capability gate (refactor #4). Emits tool.invoked,
@@ -61,7 +64,7 @@ export async function invokeTool(tc: ToolContext, name: string, input: unknown):
   if (!tool) throw new Error(`unknown tool: ${name}`);
   tool.validateInput?.(input);
 
-  const decision = await evaluateCapability(tc.ctx, tc.employeeId, tool.scope, tool.effect);
+  const decision = await evaluateCapability(tc.ctx, tc.employeeId, tool.scope, tool.effect, tc.conversationId);
   if (decision === "deny") {
     // Denied attempts (arguably the most security-relevant case) used to leave zero
     // audit trace — emit before throwing (report §3.4).
@@ -99,8 +102,10 @@ export async function invokeTool(tc: ToolContext, name: string, input: unknown):
       action: name,
       detail,
       correlationId: tc.correlationId ?? null,
+      conversationId: tc.conversationId ?? null,
+      askingMessageId: tc.askingMessageId ?? null,
     });
-    return { status: "approval", approvalId };
+    return { status: "approval", approvalId, detail, scope: tool.scope, effect: tool.effect };
   }
 
   const output = await runAndRecord(tc, tool, name, input, false);

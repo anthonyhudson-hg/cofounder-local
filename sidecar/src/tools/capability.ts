@@ -19,40 +19,57 @@ async function assertEmployeeInCompany(ctx: RuntimeContext, companyId: string, e
 export type CapabilityDecision = "allow" | "approval" | "deny";
 
 /**
- * The single capability gate (refactor #4). Rules:
- *   - No grant for the tool's scope            -> deny (agent can't touch it at all)
- *   - Requested effect <= standing grant       -> allow
- *   - Requested effect >  standing grant        -> approval (a human may authorize
- *                                                 the higher action case-by-case)
- * `autonomy_level` on the agent profile can auto-approve within policy: an
- * 'autonomous' agent's above-grant actions still surface an approval unless the
- * grant already covers them — deliberately conservative for external-write.
+ * The single capability gate (refactor #4). Rules (Claude Code-style: no access
+ * means ASK, not hard-block):
+ *   - No grant, effect <= read (or none)       -> allow (reads/lookups flow free)
+ *   - No grant, effect >  read                  -> approval (a human authorizes
+ *                                                 the consequential action inline;
+ *                                                 "Allow always" then grants it)
+ *   - Requested effect <= standing grant        -> allow
+ *   - Requested effect >  standing grant        -> approval
+ * A grant can be global (capability_grants) OR scoped to this conversation
+ * (conversation_capability_grants — the "Always in this channel" button); the
+ * higher of the two applies.
  *
- * `autonomy_level: "suggest"` is the one direction this gate actively narrows
- * rather than widens: even a within-grant action beyond a harmless read gets
- * downgraded to "approval". This is a real backstop, not just prompt guidance
- * (see runtime/promptBuilder.ts's AUTONOMY_GUIDANCE) — the system prompt only
- * shapes what the model *chooses* to do; this is what actually stops it.
- * "act-with-approval" and "autonomous" both currently resolve identically to
- * the base grant-only policy above — loosening the gate for "autonomous"
- * beyond what the grant already allows is the "deliberately conservative"
- * case the original docstring already flagged, and isn't done here.
+ * `autonomy_level: "suggest"` still narrows within-grant, effect>read actions to
+ * "approval" — a real backstop beyond the prompt's AUTONOMY_GUIDANCE.
  */
 export async function evaluateCapability(
   ctx: RuntimeContext,
   employeeId: string,
   scope: string,
   effect: Effect,
+  conversationId?: string | null,
 ): Promise<CapabilityDecision> {
-  const grant = await ctx.db
+  const global = await ctx.db
     .selectFrom("capability_grants")
     .where("employee_id", "=", employeeId)
     .where("scope", "=", scope)
     .select(["max_effect"])
     .executeTakeFirst();
 
-  if (!grant) return "deny";
-  if (effectRank(effect) > effectRank(grant.max_effect as Effect)) return "approval";
+  let maxGrant: Effect | null = global ? (global.max_effect as Effect) : null;
+
+  if (conversationId) {
+    const convGrant = await ctx.db
+      .selectFrom("conversation_capability_grants")
+      .where("employee_id", "=", employeeId)
+      .where("conversation_id", "=", conversationId)
+      .where("scope", "=", scope)
+      .select(["max_effect"])
+      .executeTakeFirst();
+    if (convGrant) {
+      const ce = convGrant.max_effect as Effect;
+      if (maxGrant === null || effectRank(ce) > effectRank(maxGrant)) maxGrant = ce;
+    }
+  }
+
+  // No grant anywhere: harmless reads flow; anything consequential asks.
+  if (maxGrant === null) {
+    return effectRank(effect) > effectRank("read") ? "approval" : "allow";
+  }
+
+  if (effectRank(effect) > effectRank(maxGrant)) return "approval";
 
   if (effectRank(effect) > effectRank("read")) {
     const profile = await ctx.db
@@ -110,6 +127,38 @@ export async function grantCapability(
       subjectId: employeeId,
       actor: { kind: "user" },
       payload: { scope, maxEffect },
+    });
+  });
+}
+
+/**
+ * Grants an employee a capability scoped to ONE conversation — the "Always in
+ * this channel" approval decision. Separate table from the global grants so a
+ * per-chat allowance never widens the employee's standing permissions; the gate
+ * takes the higher of the two (see evaluateCapability). Emits capability.granted
+ * with the conversationId so it's auditable and distinguishable from a global grant.
+ */
+export async function grantConversationCapability(
+  ctx: RuntimeContext,
+  companyId: string,
+  employeeId: string,
+  conversationId: string,
+  scope: string,
+  maxEffect: Effect,
+): Promise<void> {
+  await assertEmployeeInCompany(ctx, companyId, employeeId);
+  await mutate(ctx, async (trx, emit) => {
+    await trx
+      .insertInto("conversation_capability_grants")
+      .values({ id: randomUUID(), company_id: companyId, employee_id: employeeId, conversation_id: conversationId, scope, max_effect: maxEffect })
+      .onConflict((oc) => oc.columns(["employee_id", "conversation_id", "scope"]).doUpdateSet({ max_effect: maxEffect }))
+      .execute();
+    await emit({
+      companyId,
+      type: "capability.granted",
+      subjectId: employeeId,
+      actor: { kind: "user" },
+      payload: { scope, maxEffect, conversationId },
     });
   });
 }

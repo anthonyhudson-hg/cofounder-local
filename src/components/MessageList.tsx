@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef } from "react";
 import type { LiveActivity } from "../lib/liveActivity";
 import { MentionTarget } from "../lib/mentions";
 import { focusMessageRow } from "../lib/scrollToMessage";
-import { Conversation, Message, type Question, type SubAnswer } from "../types";
+import { Conversation, Message, type Approval, type ApprovalDecision, type Question, type SubAnswer } from "../types";
 import { Avatar } from "./Avatar";
 import { AgentWorkingRow, MessageRow } from "./MessageRow";
 
@@ -50,12 +50,18 @@ interface Props {
    *  asking assistant message; channel: the responder's ephemeral row id). */
   questions?: Record<string, Question[]>;
   onAnswerQuestion?: (questionId: string, answers: Record<string, SubAnswer>) => void;
+  /** Gated tool approvals awaiting sign-off, keyed by the same anchor scheme. */
+  approvals?: Record<string, Approval[]>;
+  onResolveApproval?: (approvalId: string, decision: ApprovalDecision) => void;
+  /** Label for the "Always in …" button on approval cards. */
+  approvalScopeLabel?: string;
 }
 
 // Shared sentinel so messages with no reactions all pass the same referentially-stable
 // empty array to MessageRow instead of a fresh `[]` literal every render (report §6.1).
 const EMPTY_REACTIONS: string[] = [];
 const EMPTY_QUESTIONS: Question[] = [];
+const EMPTY_APPROVALS: Approval[] = [];
 
 // A viewport is considered "at the bottom" within this many pixels of true bottom —
 // close enough that arriving content should still auto-scroll.
@@ -79,6 +85,9 @@ export function MessageList({
   pendingActivities,
   questions,
   onAnswerQuestion,
+  approvals,
+  onResolveApproval,
+  approvalScopeLabel,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
@@ -181,6 +190,9 @@ export function MessageList({
             activity={activityFor?.(m)}
             questions={questions?.[m.id] ?? EMPTY_QUESTIONS}
             onAnswerQuestion={onAnswerQuestion}
+            approvals={approvals?.[m.id] ?? EMPTY_APPROVALS}
+            onResolveApproval={onResolveApproval}
+            approvalScopeLabel={approvalScopeLabel}
           />
         );
       })}

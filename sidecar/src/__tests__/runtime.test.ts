@@ -21,6 +21,12 @@ import { buildMessageSendToolDef } from "../providers/claudeMessageSendTool";
 import { buildAskQuestionToolDef } from "../providers/claudeAskQuestionTool";
 import { answerQuestion, listQuestions } from "../domains/questions/service";
 import type { DeltaSink } from "../runtime/dispatch";
+import { evaluateCapability, grantConversationCapability } from "../tools/capability";
+import { registerTool } from "../tools/registry";
+import { runGatedToolInteractive } from "../providers/interactiveApproval";
+import { resolveApprovalWaiter } from "../domains/approvals/registry";
+import { listApprovals } from "../domains/approvals/service";
+import { updateAgentProfileField } from "../domains/employees/service";
 import { ZERO_USAGE, type AgentProvider, type TurnResult } from "../providers";
 import type { AgentStatus } from "@shared/protocol";
 
@@ -102,12 +108,14 @@ test("event spine: company.create emits company.created with monotonic seq", asy
   await ctx.db.destroy();
 });
 
-test("capability gate: deny without grant, allow within, approval beyond", async () => {
+test("capability gate: no grant asks for writes but allows reads, allow within, approval beyond", async () => {
   const ctx = freshCtx();
   const { id: companyId, cosEmployeeId: emp } = await createCompany(ctx, { name: "A" }, { kind: "user" });
   const tc = { ctx, companyId, employeeId: emp };
 
-  await assert.rejects(() => invokeTool({ ctx, companyId, employeeId: "nobody" }, "memory.read", {}), /denied/);
+  // Claude Code-style "ask, not block": with no grant a read flows free but a write asks.
+  assert.equal((await invokeTool(tc, "memory.read", {})).status, "ok");
+  assert.equal((await invokeTool(tc, "memory.write", { key: "k0", value: "v0" })).status, "approval");
 
   await grantCapability(ctx, companyId, emp, "tool:memory", "write-internal");
   const w = await invokeTool(tc, "memory.write", { key: "k", value: "v" });
@@ -216,11 +224,11 @@ test("capability grants: list/grant/revoke round-trip, cross-company leakage is 
 
   await revokeCapability(ctx, companyId, emp, "tool:memory");
   assert.deepEqual(await listGrants(ctx, companyId, emp), [], "revoke hard-deletes the row");
-  // Post-revoke, invokeTool falls back to a real deny (no row), not approval,
-  // and never silently no-ops.
-  await assert.rejects(
-    () => invokeTool({ ctx, companyId, employeeId: emp }, "memory.write", { key: "k", value: "v" }),
-    /denied/,
+  // Post-revoke, invokeTool falls back to the no-grant behavior: a write asks for
+  // approval (Claude Code-style "ask, not block"), and never silently no-ops.
+  assert.equal(
+    (await invokeTool({ ctx, companyId, employeeId: emp }, "memory.write", { key: "k", value: "v" })).status,
+    "approval",
   );
 
   const eventRows = await ctx.db
@@ -760,11 +768,9 @@ test("PROOF-OF-LIFE: github connector commit through gate + approval + vault", a
   // PAT lives in the encrypted vault (proves connector<->vault path)
   await storeSecret(ctx, companyId, "github_pat", "ghp_dummy");
 
-  // Without a grant, an external-write is denied.
-  await assert.rejects(
-    () => invokeTool({ ctx, companyId, employeeId: emp }, "github.commit_push", { cwd: repo, message: "x" }),
-    /denied/,
-  );
+  // Without a grant, an external-write asks for approval (Claude Code-style "ask, not block").
+  const ungranted = await invokeTool({ ctx, companyId, employeeId: emp }, "github.commit_push", { cwd: repo, message: "x" });
+  assert.equal(ungranted.status, "approval");
 
   // Grant external-read only -> the write must be human-approved.
   await grantCapability(ctx, companyId, emp, "connector:github", "external-read");
@@ -1027,12 +1033,12 @@ test("claudeMemoryTool: memory_write MCP handler goes through the real capabilit
 
   const def = buildMemoryWriteToolDef(stubToolFn, { ctx, companyId, employeeId: emp });
 
-  // No grant at all -> capability denied, surfaced as an error-flagged result,
-  // not an uncaught throw (an MCP handler throwing would crash the SDK's turn).
-  const denied = await def.handler({ key: "k1", value: "v1", kind: undefined }, {});
-  assert.equal(denied.isError, true);
-  assert.match((denied.content[0] as { text: string }).text, /Could not save this memory/);
-  assert.match((denied.content[0] as { text: string }).text, /capability denied/);
+  // No grant at all -> a write asks for approval (Claude Code-style "ask, not
+  // block"), surfaced as an error-flagged result (a throwing MCP handler would
+  // crash the SDK's turn).
+  const ungranted = await def.handler({ key: "k1", value: "v1", kind: undefined }, {});
+  assert.equal(ungranted.isError, true);
+  assert.match((ungranted.content[0] as { text: string }).text, /queued/);
 
   // Grant capped at "read" -> write-internal exceeds it -> queued for approval,
   // not silently executed and not a hard error.
@@ -1068,10 +1074,10 @@ test("claudeMessageSendTool: message_send MCP handler goes through the real capa
 
   const def = buildMessageSendToolDef(stubToolFn, { ctx, companyId, employeeId: emp });
 
-  // No grant at all -> capability denied.
-  const denied = await def.handler({ conversationName: "general", text: "hi" }, {});
-  assert.equal(denied.isError, true);
-  assert.match((denied.content[0] as { text: string }).text, /Could not post that message/);
+  // No grant at all -> a write asks for approval (Claude Code-style "ask, not block").
+  const ungranted = await def.handler({ conversationName: "general", text: "hi" }, {});
+  assert.equal(ungranted.isError, true);
+  assert.match((ungranted.content[0] as { text: string }).text, /queued/);
 
   // Grant capped at "read" -> write-internal exceeds it -> queued for approval,
   // not silently posted.
@@ -1079,7 +1085,7 @@ test("claudeMessageSendTool: message_send MCP handler goes through the real capa
   const pending = await def.handler({ conversationName: "general", text: "hi" }, {});
   assert.equal(pending.isError, true);
   assert.match((pending.content[0] as { text: string }).text, /queued/);
-  assert.match((pending.content[0] as { text: string }).text, /has NOT been posted yet/);
+  assert.match((pending.content[0] as { text: string }).text, /has NOT happened yet/);
 
   // Grant covers write-internal -> actually posts.
   await grantCapability(ctx, companyId, emp, "tool:messaging", "write-internal");
@@ -1221,6 +1227,97 @@ test("questions/service: answerQuestion validates against the spec and rejects a
   // A no-op resolver (no handler waiting) resolves cleanly with resolved:false.
   const ok = await answerQuestion(ctx, companyId, qid, { q1: { kind: "select", selected: ["Postgres"] } });
   assert.equal(ok.resolved, false, "no live handler was waiting, but the answer is still recorded");
+
+  await ctx.db.destroy();
+});
+
+// A throwaway gated tool for the interactive-approval tests (real registry, so
+// invokeTool/runToolApproved treat it exactly like a built-in gated tool).
+let gatedRuns = 0;
+registerTool({
+  name: "test.gated",
+  scope: "tool:testgated",
+  effect: "external-write",
+  description: "test-only gated tool",
+  async run() {
+    gatedRuns++;
+    return { ran: true };
+  },
+});
+
+test("capability gate: no grant ASKS for writes but ALLOWS reads (ask-instead-of-block)", async () => {
+  const ctx = freshCtx();
+  const { id: companyId, cosEmployeeId: emp } = await createCompany(ctx, { name: "Acme" }, { kind: "user" });
+  await updateAgentProfileField(ctx, emp, "autonomy_level", "autonomous"); // avoid the 'suggest' downgrade
+  assert.equal(await evaluateCapability(ctx, emp, "tool:shell", "read"), "allow", "reads flow free with no grant");
+  assert.equal(await evaluateCapability(ctx, emp, "tool:shell", "external-write"), "approval", "writes ask with no grant");
+  await grantCapability(ctx, companyId, emp, "tool:shell", "external-write");
+  assert.equal(await evaluateCapability(ctx, emp, "tool:shell", "external-write"), "allow", "an explicit grant stops asking ('Allow always')");
+  await ctx.db.destroy();
+});
+
+test("capability gate: 'Always in this channel' grant only covers that conversation", async () => {
+  const ctx = freshCtx();
+  const { id: companyId, cosEmployeeId: emp, generalConversationId } = await createCompany(ctx, { name: "Acme" }, { kind: "user" });
+  await updateAgentProfileField(ctx, emp, "autonomy_level", "autonomous");
+  const { conversation_id: dmConv } = await ctx.db.selectFrom("employees").where("id", "=", emp).select("conversation_id").executeTakeFirstOrThrow();
+  await grantConversationCapability(ctx, companyId, emp, dmConv, "tool:git", "external-write");
+  assert.equal(await evaluateCapability(ctx, emp, "tool:git", "external-write", dmConv), "allow", "allowed in the granted conversation");
+  assert.equal(await evaluateCapability(ctx, emp, "tool:git", "external-write", generalConversationId), "approval", "still asks in another conversation");
+  await ctx.db.destroy();
+});
+
+test("interactive approval: a gated tool blocks mid-turn, then runs inline once the user approves", async () => {
+  const ctx = freshCtx();
+  const { companyId, emp, conversationId, askingMessageId } = await seedDmAsking(ctx);
+  await updateAgentProfileField(ctx, emp, "autonomy_level", "autonomous");
+  gatedRuns = 0;
+  const deltas: { channel: string; data: any }[] = [];
+  const sink: DeltaSink = { delta: (channel, data) => deltas.push({ channel, data }) };
+  const abort = new AbortController();
+  const tc = { ctx, companyId, employeeId: emp, conversationId, askingMessageId, sink, abortSignal: abort.signal, interactive: true };
+
+  const pending = runGatedToolInteractive(tc, "test.gated", { foo: 1 }, (o) => ({ content: [{ type: "text", text: JSON.stringify(o) }] }));
+  let apprId: string | undefined;
+  for (let i = 0; i < 100 && !apprId; i++) {
+    apprId = (await listApprovals(ctx, companyId, "pending", conversationId))[0]?.id;
+    if (!apprId) await new Promise((r) => setTimeout(r, 5));
+  }
+  assert.ok(apprId, "approval persisted pending while the handler blocks");
+  assert.ok(deltas.some((d) => d.channel === "approval" && d.data.phase === "ask"), "the approval card delta streamed");
+  assert.equal(gatedRuns, 0, "the tool has NOT run yet");
+
+  await resolveApproval(ctx, apprId!, "approved", "user");
+  assert.equal(resolveApprovalWaiter(apprId!, "once"), true, "a live handler was waiting and got unblocked");
+  const result = (await pending) as { isError?: boolean; content: unknown[] };
+  assert.equal(result.isError, undefined);
+  assert.equal(gatedRuns, 1, "the tool ran inline after approval");
+
+  await ctx.db.destroy();
+});
+
+test("interactive approval: aborting the turn cancels the wait and denies the approval without hanging", async () => {
+  const ctx = freshCtx();
+  const { companyId, emp, conversationId, askingMessageId } = await seedDmAsking(ctx);
+  await updateAgentProfileField(ctx, emp, "autonomy_level", "autonomous");
+  gatedRuns = 0;
+  const abort = new AbortController();
+  const tc = { ctx, companyId, employeeId: emp, conversationId, askingMessageId, sink: { delta: () => {} }, abortSignal: abort.signal, interactive: true };
+
+  const pending = runGatedToolInteractive(tc, "test.gated", {}, (o) => ({ content: [{ type: "text", text: JSON.stringify(o) }] }));
+  let apprId: string | undefined;
+  for (let i = 0; i < 100 && !apprId; i++) {
+    apprId = (await listApprovals(ctx, companyId, "pending", conversationId))[0]?.id;
+    if (!apprId) await new Promise((r) => setTimeout(r, 5));
+  }
+  assert.ok(apprId);
+
+  abort.abort();
+  const result = (await pending) as { isError?: boolean; content: unknown[] };
+  assert.equal(result.isError, true);
+  assert.equal(gatedRuns, 0, "the tool did not run");
+  const row = await ctx.db.selectFrom("approvals").where("id", "=", apprId!).select("status").executeTakeFirstOrThrow();
+  assert.equal(row.status, "denied");
 
   await ctx.db.destroy();
 });
@@ -1462,8 +1559,13 @@ test("filesystem tools: capability-gated CRUD in an isolated worktree (read/crea
   await setEmployeeProjects(ctx, companyId, emp, [project.id]);
   const tc = { ctx, companyId, employeeId: emp };
 
-  // No grant on tool:filesystem → even a read is denied by the gate.
-  await assert.rejects(() => invokeTool(tc, "project.list", {}), /capability denied/);
+  // Gate is "ask, not block": with no grant a read flows free, but a write asks.
+  assert.equal((await invokeTool(tc, "project.list", {})).status, "ok", "reads are allowed without a grant");
+  assert.equal(
+    (await invokeTool(tc, "task.open", { projectId: project.id, title: "ungranted" })).status,
+    "approval",
+    "a write (task.open) without a grant is routed to approval, not executed",
+  );
 
   await grantCapability(ctx, companyId, emp, "tool:filesystem", "write-internal");
 

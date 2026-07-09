@@ -23,7 +23,13 @@ import type { Tool, ToolContext } from "../types";
  * isolated branch → PR).
  */
 
+// Per-area scopes so "Allow always" is narrow: granting shell doesn't also
+// auto-allow file deletes or PRs. File ops share tool:filesystem; shell.run and
+// git.open_pr get their own scopes. listScopes() is registry-driven, so the
+// Permissions UI shows all three automatically.
 const SCOPE = "tool:filesystem";
+const SHELL_SCOPE = "tool:shell";
+const GIT_SCOPE = "tool:git";
 const MAX_READ_BYTES = 256 * 1024;
 const MAX_OUTPUT_CHARS = 12_000;
 const SHELL_TIMEOUT_MS = 120_000;
@@ -277,7 +283,7 @@ const fsMove: Tool = {
 
 const shellRun: Tool = {
   name: "shell.run",
-  scope: SCOPE,
+  scope: SHELL_SCOPE,
   effect: "external-write",
   description:
     "Run a shell command in a task's worktree (build/test/lint/etc.). Runs sandboxed to the worktree. Requires approval unless granted.",
@@ -316,7 +322,7 @@ function parseOwnerRepo(remoteUrl: string): { owner: string; repo: string } | nu
 
 const gitOpenPr: Tool = {
   name: "git.open_pr",
-  scope: SCOPE,
+  scope: GIT_SCOPE,
   effect: "external-write",
   description:
     "Commit all changes on the task's branch and open a pull request (or push the branch, for local-only repos). Requires approval unless granted.",

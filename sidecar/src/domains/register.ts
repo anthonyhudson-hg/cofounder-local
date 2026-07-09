@@ -10,9 +10,10 @@ import {
   setActiveCompanyId,
 } from "./companies/service";
 import { resolveApproval, listApprovals } from "./approvals/service";
+import { resolveApprovalWaiter, type ApprovalDecision } from "./approvals/registry";
 import { listEvents } from "./audit/service";
-import { invokeTool, runToolApproved, listScopes } from "../tools/registry";
-import { listGrants, grantCapability, revokeCapability } from "../tools/capability";
+import { invokeTool, runToolApproved, listScopes, getTool } from "../tools/registry";
+import { listGrants, grantCapability, grantConversationCapability, revokeCapability } from "../tools/capability";
 import type { Effect } from "../tools/types";
 import { registerMemoryTools } from "../tools/builtin/memory";
 import { registerMessagingTools } from "../tools/builtin/messaging";
@@ -75,6 +76,8 @@ import {
   listEmployeeProjectIds,
 } from "./projects/service";
 import { createTask, listTasks, setTaskStatus, type TaskStatus } from "./tasks/service";
+import { getProjectTree, readProjectFile } from "./projects/files";
+import { getProjectCommits, getProjectBranches, getProjectPulls, getProjectIssues } from "./projects/repo";
 import type { CommandEnvelope as CE } from "@shared/protocol";
 import type { ToolContext } from "../tools/types";
 
@@ -213,6 +216,25 @@ register("command:project.remove", async (ctx, inbound) => {
   await removeProject(ctx, requireCompany(inbound), projectId);
   return { ok: true };
 });
+register("query:project.tree", async (ctx, inbound) =>
+  getProjectTree(ctx, requireCompany(inbound), p<{ projectId: string }>(inbound).projectId),
+);
+register("query:project.file", async (ctx, inbound) => {
+  const { projectId, path } = p<{ projectId: string; path: string }>(inbound);
+  return readProjectFile(ctx, requireCompany(inbound), projectId, path);
+});
+register("query:project.commits", async (ctx, inbound) =>
+  getProjectCommits(ctx, requireCompany(inbound), p<{ projectId: string }>(inbound).projectId),
+);
+register("query:project.branches", async (ctx, inbound) =>
+  getProjectBranches(ctx, requireCompany(inbound), p<{ projectId: string }>(inbound).projectId),
+);
+register("query:project.pulls", async (ctx, inbound) =>
+  getProjectPulls(ctx, requireCompany(inbound), p<{ projectId: string }>(inbound).projectId),
+);
+register("query:project.issues", async (ctx, inbound) =>
+  getProjectIssues(ctx, requireCompany(inbound), p<{ projectId: string }>(inbound).projectId),
+);
 register("query:employee.projects", async (ctx, inbound) =>
   listEmployeeProjectIds(ctx, p<{ employeeId: string }>(inbound).employeeId),
 );
@@ -433,35 +455,43 @@ register("command:tool.invoke", async (ctx, inbound) => {
   return invokeTool(tc, cmd.payload.tool, cmd.payload.input);
 });
 
+const VALID_APPROVAL_DECISIONS: ReadonlySet<string> = new Set<ApprovalDecision>(["denied", "once", "always", "always-here"]);
+
 register("command:approval.resolve", async (ctx, inbound) => {
-  const cmd = inbound as CommandEnvelope<
-    "approval.resolve",
-    { approvalId: string; decision: "approved" | "denied" }
-  >;
-  // The type above is compile-time only; validate the actual wire value before it
-  // reaches a `status` column SQLite won't itself constrain to these two values
-  // (report §4.11).
-  if (cmd.payload.decision !== "approved" && cmd.payload.decision !== "denied") {
-    throw new Error(`invalid approval decision: ${cmd.payload.decision}`);
+  const { approvalId, decision } = p<{ approvalId: string; decision: ApprovalDecision }>(inbound);
+  if (!VALID_APPROVAL_DECISIONS.has(decision)) throw new Error(`invalid approval decision: ${decision}`);
+  const approved = decision !== "denied";
+  const resolved = await resolveApproval(ctx, approvalId, approved ? "approved" : "denied", "user");
+
+  // Apply the standing grant BEFORE unblocking, so the run sees it and future
+  // same-scope actions skip the prompt. "always" = global; "always-here" = this
+  // conversation only. Grant at the tool's own effect tier.
+  if ((decision === "always" || decision === "always-here") && resolved.employeeId) {
+    const tool = getTool(resolved.action);
+    if (tool) {
+      if (decision === "always") {
+        await grantCapability(ctx, resolved.companyId, resolved.employeeId, tool.scope, tool.effect);
+      } else if (resolved.conversationId) {
+        await grantConversationCapability(ctx, resolved.companyId, resolved.employeeId, resolved.conversationId, tool.scope, tool.effect);
+      }
+    }
   }
-  const resolved = await resolveApproval(ctx, cmd.payload.approvalId, cmd.payload.decision, "user");
-  if (cmd.payload.decision !== "approved" || !resolved.employeeId) {
-    return { executed: false };
-  }
-  // Re-run the gated action now that a human approved it.
-  const tc: ToolContext = {
-    ctx,
-    companyId: resolved.companyId,
-    employeeId: resolved.employeeId,
-    correlationId: cmd.id,
-  };
+
+  // If a turn is blocked mid-flight on this approval, unblock it — its handler
+  // runs the tool inline with the live context.
+  const wasLive = resolveApprovalWaiter(approvalId, decision);
+  if (wasLive) return { executed: true, live: true };
+
+  // No live waiter (background/orphaned turn): fall back to the re-run path.
+  if (!approved || !resolved.employeeId) return { executed: false };
+  const tc: ToolContext = { ctx, companyId: resolved.companyId, employeeId: resolved.employeeId, correlationId: inbound.id };
   const output = await runToolApproved(tc, resolved.action, resolved.detail);
   return { executed: true, output };
 });
 
 register("query:approvals.list", async (ctx, inbound) => {
-  const { status } = p<{ status?: "pending" | "approved" | "denied" | "expired" | null }>(inbound);
-  return listApprovals(ctx, requireCompany(inbound), status === undefined ? "pending" : status);
+  const { status, conversationId } = p<{ status?: "pending" | "approved" | "denied" | "expired" | null; conversationId?: string | null }>(inbound);
+  return listApprovals(ctx, requireCompany(inbound), status === undefined ? "pending" : status, conversationId ?? null);
 });
 
 register("query:audit.list", async (ctx, inbound) => {

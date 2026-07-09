@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { command, onRuntimeEvent, query, startRuntimeBus } from "../lib/runtimeClient";
+import type { ApprovalDecision } from "../types";
 
 export interface ApprovalListItem {
   id: string;
@@ -42,7 +43,7 @@ export function useApprovals(companyId: string | null) {
   }, [reload]);
 
   const resolve = useCallback(
-    async (approvalId: string, decision: "approved" | "denied") => {
+    async (approvalId: string, decision: ApprovalDecision) => {
       await command("approval.resolve", { approvalId, decision }, companyId);
       await reload();
     },

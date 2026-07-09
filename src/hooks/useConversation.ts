@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { command, commandStreaming, query } from "../lib/runtimeClient";
 import { useAgentActivity } from "../store/agentActivity";
 import { REACTOR_USER } from "../types";
-import { Effort, Employee, Message, Reaction, modelProvider, type Question, type QuestionSpec, type SubAnswer } from "../types";
+import { Effort, Employee, Message, Reaction, modelProvider, type Approval, type ApprovalDecision, type Question, type QuestionSpec, type SubAnswer } from "../types";
 import { useStaleGuard } from "./useStaleGuard";
 
 /** Groups question rows by their UI anchor (DM: the asking assistant message id;
@@ -14,6 +14,16 @@ function groupQuestions(rows: Question[]): Record<string, Question[]> {
     const key = q.asking_message_id;
     if (!key) continue;
     (grouped[key] ??= []).push(q);
+  }
+  return grouped;
+}
+
+/** Groups pending approvals by the asking assistant message id. */
+function groupApprovals(rows: Approval[]): Record<string, Approval[]> {
+  const grouped: Record<string, Approval[]> = {};
+  for (const a of rows) {
+    if (!a.askingMessageId) continue;
+    (grouped[a.askingMessageId] ??= []).push(a);
   }
   return grouped;
 }
@@ -68,6 +78,7 @@ export function useConversation(
   const [replyCounts, setReplyCounts] = useState<Record<string, number>>({});
   const [reactions, setReactions] = useState<Record<string, string[]>>({});
   const [questions, setQuestions] = useState<Record<string, Question[]>>({});
+  const [approvals, setApprovals] = useState<Record<string, Approval[]>>({});
   const [sending, setSending] = useState(false);
   const [activeTool, setActiveTool] = useState<ActiveTool | null>(null);
   const messagesRef = useRef<Message[]>([]);
@@ -104,13 +115,15 @@ export function useConversation(
     const rows = await query<Message[]>("messages.list", { conversationId }, null);
     const replyCountRows = await query<Record<string, number>>("messages.replyCounts", { conversationId }, null);
     const questionRows = await query<Question[]>("questions.list", { conversationId }, null);
+    const approvalRows = await query<Approval[]>("approvals.list", { status: "pending", conversationId }, companyId);
     if (!messagesGuard.isCurrent(token)) return;
     messagesRef.current = rows;
     setMessages(rows);
     setReplyCounts(replyCountRows);
     setQuestions(groupQuestions(questionRows));
+    setApprovals(groupApprovals(approvalRows));
     await reloadReactions();
-  }, [conversationId, reloadReactions, messagesGuard]);
+  }, [conversationId, companyId, reloadReactions, messagesGuard]);
 
   useEffect(() => {
     reload();
@@ -182,6 +195,25 @@ export function useConversation(
                   created_at: new Date().toISOString(), resolved_at: null,
                 };
                 return { ...prev, [assistantMsgId]: [...list, q] };
+              });
+              return;
+            }
+            if (channel === "approval") {
+              // A gated tool call is blocked awaiting sign-off. Render the card
+              // optimistically under the (optimistic-id) assistant row; reload
+              // re-keys to the server id after the turn.
+              const { phase, approvalId, action, detail, scope } = data as {
+                phase: "ask" | "keepalive"; approvalId: string; action: string; detail: unknown; scope: string | null;
+              };
+              if (phase === "keepalive") return;
+              setApprovals((prev) => {
+                const list = prev[assistantMsgId] ?? [];
+                if (list.some((a) => a.id === approvalId)) return prev;
+                const a: Approval = {
+                  id: approvalId, employeeId: employee?.id ?? null, conversationId, askingMessageId: assistantMsgId,
+                  action, detail, scope, status: "pending", requestedAt: new Date().toISOString(),
+                };
+                return { ...prev, [assistantMsgId]: [...list, a] };
               });
               return;
             }
@@ -318,5 +350,27 @@ export function useConversation(
     [companyId],
   );
 
-  return { messages, replyCounts, reactions, questions, toggleReaction, send, cancel, answerQuestion, sending, activeTool, reload };
+  /** Resolve a pending inline approval. Optimistically flips the card, then
+   *  resolves it server-side (which unblocks the turn and runs the tool inline
+   *  on allow). Marks orphaned if no turn was still waiting. */
+  const resolveApproval = useCallback(
+    async (approvalId: string, decision: ApprovalDecision) => {
+      const patch = (fn: (a: Approval) => Approval) =>
+        setApprovals((prev) => {
+          const next: Record<string, Approval[]> = {};
+          for (const [k, list] of Object.entries(prev)) next[k] = list.map((a) => (a.id === approvalId ? fn(a) : a));
+          return next;
+        });
+      patch((a) => ({ ...a, status: decision === "denied" ? "denied" : "approved" }));
+      try {
+        const res = await command<{ executed: boolean; live?: boolean }>("approval.resolve", { approvalId, decision }, companyId);
+        if (decision !== "denied" && !res.live) patch((a) => ({ ...a, orphaned: true }));
+      } catch (err) {
+        console.error("approval.resolve failed:", err);
+      }
+    },
+    [companyId],
+  );
+
+  return { messages, replyCounts, reactions, questions, approvals, toggleReaction, send, cancel, answerQuestion, resolveApproval, sending, activeTool, reload };
 }

@@ -53,6 +53,50 @@ export interface Task {
   updated_at: string;
 }
 
+/** Per-file git status letter shown in the project file tree. */
+export type GitStatusLetter = "M" | "A" | "D" | "R" | "?";
+
+export interface ProjectTree {
+  files: string[];
+  status: Record<string, GitStatusLetter>;
+  branch: string;
+}
+
+export interface ProjectFile {
+  content: string;
+  truncated: boolean;
+  binary: boolean;
+}
+
+export interface Commit {
+  sha: string;
+  shortSha: string;
+  author: string;
+  date: string;
+  subject: string;
+}
+export interface Branch {
+  name: string;
+  current: boolean;
+}
+export interface Pull {
+  number: number;
+  title: string;
+  state: string;
+  url: string;
+  author: string;
+  updatedAt: string;
+  draft: boolean;
+}
+export interface Issue {
+  number: number;
+  title: string;
+  state: string;
+  url: string;
+  author: string;
+  updatedAt: string;
+}
+
 export type MessageRole = "user" | "assistant";
 export type MessageStatus = "pending" | "streaming" | "complete" | "error";
 
@@ -276,6 +320,33 @@ export interface Question {
   resolved_at: string | null;
   /** Client-only: set when we answered but the agent was no longer waiting
    *  (orphaned by a restart) — the answer was recorded but the turn didn't resume. */
+  orphaned?: boolean;
+}
+
+// ---- Inline tool approvals (Claude Code–style) ----
+
+export type ApprovalDecision = "denied" | "once" | "always" | "always-here";
+
+/** A gated tool action awaiting the user's sign-off, rendered as an inline card
+ *  in the chat that triggered it. Matches the runtime's ApprovalListItem, plus a
+ *  synthesized-from-delta form while a turn streams. */
+export interface Approval {
+  id: string;
+  employeeId: string | null;
+  conversationId: string | null;
+  /** DM: the asking assistant message id. Channel: null (anchored to the
+   *  responder's ephemeral row by employee). */
+  askingMessageId: string | null;
+  /** Registry tool name, e.g. "shell.run", "fs.edit". */
+  action: string;
+  /** Input merged with the tool's approval preview (command / diff / path…). */
+  detail: unknown;
+  /** Capability scope "Allow always" would grant, e.g. "tool:shell". */
+  scope: string | null;
+  status: "pending" | "approved" | "denied" | "expired";
+  requestedAt: string;
+  resolvedAt?: string | null;
+  /** Client-only: resolved but no turn was still waiting (orphaned by a restart). */
   orphaned?: boolean;
 }
 

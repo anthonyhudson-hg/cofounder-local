@@ -1,8 +1,8 @@
 import { z } from "zod";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { tool as ToolFn } from "@anthropic-ai/claude-agent-sdk";
-import { invokeTool } from "../tools/registry";
 import type { ToolContext } from "../tools/types";
+import { runGatedToolInteractive } from "./interactiveApproval";
 import { MEMORY_KINDS } from "../tools/builtin/memory";
 
 /** Shared by every in-process agent tool (memory.write, message.send, ...) — one MCP server, several tools. */
@@ -41,19 +41,7 @@ export function buildMemoryWriteToolDef(toolFn: typeof ToolFn, tc: ToolContext) 
     },
     async (args): Promise<CallToolResult> => {
       try {
-        const result = await invokeTool(tc, "memory.write", args);
-        if (result.status === "approval") {
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text",
-                text: `This write requires a human's approval and has been queued (approval id ${result.approvalId}). It has NOT happened yet — tell the user it's pending review rather than assuming it succeeded.`,
-              },
-            ],
-          };
-        }
-        return { content: [{ type: "text", text: "Saved." }] };
+        return await runGatedToolInteractive(tc, "memory.write", args, () => ({ content: [{ type: "text", text: "Saved." }] }));
       } catch (err) {
         return {
           isError: true,

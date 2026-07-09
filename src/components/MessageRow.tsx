@@ -3,13 +3,14 @@ import { memo, useEffect, useRef, useState } from "react";
 import { QUICK_REACTIONS } from "../lib/emoji";
 import { activityStatusText, type LiveActivity } from "../lib/liveActivity";
 import { MentionTarget } from "../lib/mentions";
-import { Message, modelLabel, type Question, type SubAnswer } from "../types";
+import { Message, modelLabel, type Approval, type ApprovalDecision, type Question, type SubAnswer } from "../types";
 import { Avatar } from "./Avatar";
 import { DebugPanel } from "./DebugPanel";
 import { Emoji } from "./Emoji";
 import { EmojiPicker } from "./EmojiPicker";
 import { MarkdownContent } from "./MarkdownContent";
 import { QuestionCard } from "./QuestionCard";
+import { ApprovalCard } from "./ApprovalCard";
 
 /** Re-renders every second while `active` so the "N ago" line stays live without
  *  the server having to stream a status per second (Paperclip's useLiveElapsed). */
@@ -108,6 +109,11 @@ interface Props {
   questions?: Question[];
   /** Stable, id-taking callback to submit an answer (memo-safe, from the hook). */
   onAnswerQuestion?: (questionId: string, answers: Record<string, SubAnswer>) => void;
+  /** Gated tool actions awaiting approval, anchored to this message (memo-safe sentinel). */
+  approvals?: Approval[];
+  onResolveApproval?: (approvalId: string, decision: ApprovalDecision) => void;
+  /** Label for the "Always in …" button, e.g. "#general" or "this DM". */
+  approvalScopeLabel?: string;
 }
 
 function formatTime(iso: string): string {
@@ -147,6 +153,9 @@ function MessageRowImpl({
   activity,
   questions,
   onAnswerQuestion,
+  approvals,
+  onResolveApproval,
+  approvalScopeLabel,
 }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -199,6 +208,13 @@ function MessageRowImpl({
           <div className="question-cards">
             {questions.map((q) => (
               <QuestionCard key={q.id} question={q} employeeName={displayName} onAnswer={onAnswerQuestion} />
+            ))}
+          </div>
+        )}
+        {approvals && approvals.length > 0 && onResolveApproval && (
+          <div className="question-cards">
+            {approvals.map((a) => (
+              <ApprovalCard key={a.id} approval={a} employeeName={displayName} scopeLabel={approvalScopeLabel ?? "this chat"} onResolve={onResolveApproval} />
             ))}
           </div>
         )}

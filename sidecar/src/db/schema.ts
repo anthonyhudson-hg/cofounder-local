@@ -166,6 +166,24 @@ export interface ApprovalsTable {
   requested_at: Generated<string>;
   resolved_at: string | null;
   resolved_by: string | null;
+  /** The conversation/message the gated action was requested in, so the approval
+   *  can render inline in that chat. Null for approvals raised outside a turn. */
+  conversation_id: string | null;
+  asking_message_id: string | null;
+  correlation_id: string | null;
+}
+
+/** Per-conversation capability grant — the "Always in this channel" approval
+ *  decision. Kept separate from the global capability_grants so a per-chat
+ *  allowance never widens standing permissions. */
+export interface ConversationCapabilityGrantsTable {
+  id: string;
+  company_id: string;
+  employee_id: string;
+  conversation_id: string;
+  scope: string;
+  max_effect: Generated<"none" | "read" | "write-internal" | "external-read" | "external-write">;
+  created_at: Generated<string>;
 }
 
 export interface AgentProfilesTable {
@@ -264,6 +282,7 @@ export interface Database {
   events: EventsTable;
   secrets: SecretsTable;
   capability_grants: CapabilityGrantsTable;
+  conversation_capability_grants: ConversationCapabilityGrantsTable;
   approvals: ApprovalsTable;
   agent_profiles: AgentProfilesTable;
   agent_memory: AgentMemoryTable;

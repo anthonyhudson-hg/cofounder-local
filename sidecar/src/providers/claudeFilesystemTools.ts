@@ -1,16 +1,16 @@
 import { z, type ZodRawShape } from "zod";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { tool as ToolFn } from "@anthropic-ai/claude-agent-sdk";
-import { invokeTool } from "../tools/registry";
 import { AGENT_TOOLS_MCP_SERVER_NAME } from "./claudeMemoryTool";
+import { runGatedToolInteractive } from "./interactiveApproval";
 import type { ToolContext } from "../tools/types";
 
 /**
  * MCP tool definitions for the project-sandboxing filesystem/shell/git tools.
- * Each routes through invokeTool (the capability gate), so an agent with no
- * grant is denied and an over-its-tier action (edit/delete/shell/PR without a
- * high-enough grant) comes back as a "queued for approval" result instead of
- * executing — exactly like memory.write / github.commit_push.
+ * Each routes through runGatedToolInteractive (the capability gate + inline
+ * approval): an over-its-tier action (edit/delete/shell/PR without a high-enough
+ * grant) surfaces an approval card in the chat and BLOCKS until the user
+ * decides, then runs inline on allow — exactly like memory.write / message.send.
  */
 
 /** MCP surfaces tools as `mcp__<server>__<name>`; underscore names, dotted registry names. */
@@ -54,19 +54,9 @@ export function buildFilesystemToolDefs(toolFn: typeof ToolFn, tc: ToolContext) 
   return DEFS.map((def) =>
     toolFn(def.mcpName, def.description, def.shape, async (args): Promise<CallToolResult> => {
       try {
-        const result = await invokeTool(tc, def.registryName, args ?? {});
-        if (result.status === "approval") {
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text",
-                text: `This action requires the user's approval and has been queued (approval id ${result.approvalId}). It has NOT happened yet — tell the user it's pending review rather than assuming it succeeded.`,
-              },
-            ],
-          };
-        }
-        return { content: [{ type: "text", text: JSON.stringify(result.output) }] };
+        return await runGatedToolInteractive(tc, def.registryName, args ?? {}, (output) => ({
+          content: [{ type: "text", text: JSON.stringify(output) }],
+        }));
       } catch (err) {
         return { isError: true, content: [{ type: "text", text: `${def.registryName} failed: ${err instanceof Error ? err.message : String(err)}` }] };
       }

@@ -352,4 +352,28 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX idx_questions_pending ON questions(status) WHERE status = 'pending';
     `,
   },
+  {
+    name: "0011_approvals_inline",
+    // Tie an approval to the chat that triggered it so it can render inline (like
+    // Claude Code) instead of only on a separate page, and add per-conversation
+    // capability grants for the "Always in this channel" approval decision.
+    sql: `
+      ALTER TABLE approvals ADD COLUMN conversation_id TEXT REFERENCES conversations(id);
+      ALTER TABLE approvals ADD COLUMN asking_message_id TEXT REFERENCES messages(id);
+      ALTER TABLE approvals ADD COLUMN correlation_id TEXT;
+      CREATE INDEX idx_approvals_conversation ON approvals(conversation_id, requested_at);
+
+      CREATE TABLE conversation_capability_grants (
+          id TEXT PRIMARY KEY,
+          company_id TEXT NOT NULL REFERENCES companies(id),
+          employee_id TEXT NOT NULL REFERENCES employees(id),
+          conversation_id TEXT NOT NULL REFERENCES conversations(id),
+          scope TEXT NOT NULL,
+          max_effect TEXT NOT NULL DEFAULT 'read' CHECK (max_effect IN ('none','read','write-internal','external-read','external-write')),
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(employee_id, conversation_id, scope)
+      );
+      CREATE INDEX idx_conversation_grants_lookup ON conversation_capability_grants(employee_id, conversation_id, scope);
+    `,
+  },
 ];

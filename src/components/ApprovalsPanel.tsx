@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useApprovals } from "../hooks/useApprovals";
+import type { ApprovalDecision } from "../types";
 import { EmployeeInfo } from "./MessageList";
 
 interface Props {
@@ -19,7 +20,7 @@ export function ApprovalsPanel({ companyId, employeesById }: Props) {
   const { approvals, loaded, resolve } = useApprovals(companyId);
   const [resolvingId, setResolvingId] = useState<string | null>(null);
 
-  const handleResolve = async (approvalId: string, decision: "approved" | "denied") => {
+  const handleResolve = async (approvalId: string, decision: ApprovalDecision) => {
     setResolvingId(approvalId);
     try {
       await resolve(approvalId, decision);
@@ -64,7 +65,7 @@ export function ApprovalsPanel({ companyId, employeesById }: Props) {
                   <button
                     className="settings-save-btn"
                     disabled={busy}
-                    onClick={() => handleResolve(a.id, "approved")}
+                    onClick={() => handleResolve(a.id, "once")}
                   >
                     {busy ? "Working…" : "Approve"}
                   </button>
